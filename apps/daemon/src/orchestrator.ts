@@ -1465,7 +1465,7 @@ export class Orchestrator {
           this.update(run.id, { activity: "Running checks on the base branch" });
           const baseline: Record<string, boolean> = {};
           for (const check of ctx.project.checks) {
-            const res = await exec("sh", ["-c", check.command], { cwd: dir, timeoutMs: check.timeoutMs ?? 600_000, env: this.workspace.env(run.projectId, run.taskId) });
+            const res = await exec("sh", ["-c", check.command], { cwd: dir, timeoutMs: check.timeoutMs ?? 600_000, env: this.workspace.env(run.projectId, run.taskId), group: true });
             baseline[check.name] = res.code === 0;
             this.workspace.recordCheck(run.id, {
               id: `${run.id}:base:${check.name}:${Date.now()}`,
@@ -2043,7 +2043,7 @@ export class Orchestrator {
     const outputs: string[] = [];
     const issueIds: string[] = [];
     for (const check of checks) {
-      const res = await exec("sh", ["-c", check.command], { cwd: run.worktree, timeoutMs: check.timeoutMs ?? 600_000, env: this.workspace.env(run.projectId, run.taskId) });
+      const res = await exec("sh", ["-c", check.command], { cwd: run.worktree, timeoutMs: check.timeoutMs ?? 600_000, env: this.workspace.env(run.projectId, run.taskId), group: true });
       const ok = res.code === 0;
       const preExisting = !ok && baseline[check.name] === false;
       this.workspace.recordCheck(run.id, {

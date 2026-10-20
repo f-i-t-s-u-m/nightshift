@@ -17,6 +17,7 @@ import { cn } from "@/lib/utils";
 import { api, isNotFound, messageOf } from "../api";
 import { AttachButton, UploadTray, useUploads } from "../components/attachments";
 import { BranchPicker } from "../components/BranchPicker";
+import { Markdown } from "../components/Markdown";
 import { Notice } from "../components/Notice";
 import { Dot, EmptyState, Page, PageHeader, PhaseBadge, ProjectMeta, StatusPill, TONE_TEXT } from "../components/TaskBits";
 import { projectSettingsHref, taskHref } from "../routing";
@@ -258,6 +259,7 @@ function NewTaskDialog({
   const [title, setTitle] = useState("");
   const [taskId, setTaskId] = useState("");
   const [body, setBody] = useState("");
+  const [bodyView, setBodyView] = useState<"write" | "preview">("write");
   const [type, setType] = useState<TaskType>(DEFAULT_TASK_TYPE);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -287,6 +289,7 @@ function NewTaskDialog({
       setTitle("");
       setTaskId("");
       setBody("");
+      setBodyView("write");
       setType(DEFAULT_TASK_TYPE);
       onCreated(type);
     } catch (err) {
@@ -298,7 +301,7 @@ function NewTaskDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-xl">
+      <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto sm:max-w-2xl">
         <form className={cn("grid gap-4", uploads.dragging && "rounded-lg outline-2 outline-dashed outline-primary")} onSubmit={(e) => void submit(e)} {...uploads.dropProps}>
           <DialogHeader>
             <DialogTitle>New task</DialogTitle>
@@ -366,25 +369,50 @@ function NewTaskDialog({
             ) : null}
           </div>
           <div className="grid gap-2">
-            <Label htmlFor={`${id}-body`}>Description</Label>
-            <Textarea
-              id={`${id}-body`}
-              rows={6}
-              value={body}
-              onChange={(e) => setBody(e.target.value)}
-              onPaste={uploads.onPaste}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
-                  e.preventDefault();
-                  void submit(e);
-                }
-              }}
-              placeholder="Context, acceptance criteria, links. Paste or drop screenshots here."
-            />
+            <div className="flex items-center justify-between gap-2">
+              <Label htmlFor={`${id}-body`}>Description</Label>
+              <div className="flex rounded-md border p-0.5 text-xs" role="group" aria-label="Description view">
+                {(["write", "preview"] as const).map((m) => (
+                  <button
+                    key={m}
+                    type="button"
+                    aria-pressed={bodyView === m}
+                    onClick={() => setBodyView(m)}
+                    className={cn("rounded px-2 py-0.5 capitalize focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50", bodyView === m ? "bg-muted font-medium text-foreground" : "text-muted-foreground hover:text-foreground")}
+                  >
+                    {m}
+                  </button>
+                ))}
+              </div>
+            </div>
+            {bodyView === "write" ? (
+              <Textarea
+                id={`${id}-body`}
+                rows={8}
+                value={body}
+                onChange={(e) => setBody(e.target.value)}
+                onPaste={uploads.onPaste}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+                    e.preventDefault();
+                    void submit(e);
+                  }
+                }}
+                placeholder="Context, acceptance criteria, links. Markdown works (# headings, - lists, `code`). Paste or drop screenshots here."
+                className="max-h-[45dvh] resize-y overflow-y-auto"
+              />
+            ) : (
+              <div className="max-h-[45dvh] min-h-36 overflow-y-auto rounded-lg border px-3 py-2" aria-label="Description preview">
+                {body.trim() ? <Markdown text={body} /> : <p className="text-sm text-muted-foreground">Nothing to preview yet.</p>}
+              </div>
+            )}
+            <p className="text-xs text-muted-foreground">
+              {body.trim() ? `${body.trim().split(/\s+/).length} words · ` : ""}The task page shows it formatted like the preview. ⌘/Ctrl + Enter creates the task.
+            </p>
           </div>
           <UploadTray uploads={uploads} />
           {error ? <Notice tone="danger">{error}</Notice> : null}
-          <DialogFooter className="items-center sm:justify-between">
+          <DialogFooter className="sticky -bottom-4 -mx-4 -mb-4 items-center border-t bg-popover px-4 py-3 sm:justify-between">
             <AttachButton uploads={uploads} />
             <div className="flex gap-2">
               <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
