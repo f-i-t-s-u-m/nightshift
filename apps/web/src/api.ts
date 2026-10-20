@@ -258,6 +258,7 @@ export const verifyApi = {
   setIssue: (p: string, t: string, id: string, status: "dismissed" | "open") => post<{ issue: Issue }>(V.issue(p, t, id), { status }),
   answer: (p: string, t: string, id: string, answer: string) => post<{ decision: Decision; effect: string }>(V.decision(p, t, id), { answer }),
   runTester: (p: string, t: string, testerId: string) => post<{ stepId: string; effect: string }>(V.runTester(p, t, testerId)),
+  stopTester: (p: string, t: string, testerId: string) => post<{ stopped: number }>(V.stopTester(p, t, testerId)),
   triggers: (p: string) => request<TriggersResponse>(V.triggers(p)),
   saveTriggers: (p: string, triggers: TriggerConfig) =>
     request<TriggersResponse>(V.triggers(p), { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ triggers }) }),

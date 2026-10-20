@@ -15,6 +15,7 @@ import {
   Radar,
   ScanSearch,
   Settings,
+  Square,
   Workflow,
   Wrench,
   type LucideIcon,
@@ -359,7 +360,35 @@ function IssueChip({ issue, onJump }: { issue: Issue; onJump: (id: string) => vo
   );
 }
 
-function StepRow({ step, issues, now, onJump, last }: { step: VerificationStep; issues: Map<string, Issue>; now: number; onJump: (id: string) => void; last: boolean }) {
+/** Stops a task's running (or queued) tester; `onStopped` reloads the view. */
+function useStopTester(projectId: string, taskId: string, onStopped: () => void) {
+  const [stopping, setStopping] = useState<string | null>(null);
+  const stop = async (testerId: string, name: string) => {
+    setStopping(testerId);
+    try {
+      await verifyApi.stopTester(projectId, taskId, testerId);
+      toast.success(`${name} stopped`);
+      onStopped();
+    } catch (err) {
+      toast.error(`Could not stop ${name}`, { description: messageOf(err) });
+    } finally {
+      setStopping(null);
+    }
+  };
+  return { stopping, stop };
+}
+
+function StopTesterButton({ busy, name, onClick }: { busy: boolean; name: string; onClick: () => void }) {
+  return (
+    <Button size="sm" variant="outline" className="h-7 text-destructive hover:bg-destructive/10 hover:text-destructive" disabled={busy} onClick={onClick} aria-label={`Stop ${name}`}>
+      {busy ? <Spinner className="size-3 text-current" /> : <Square />} Stop
+    </Button>
+  );
+}
+
+type StepStop = { stopping: string | null; stop: (testerId: string, name: string) => Promise<void> };
+
+function StepRow({ step, issues, now, onJump, last, stopper }: { step: VerificationStep; issues: Map<string, Issue>; now: number; onJump: (id: string) => void; last: boolean; stopper: StepStop }) {
   const kind = STEP_KINDS[step.kind] ?? { label: step.kind, icon: Bot };
   const status = STEP_STATUS[step.status] ?? STEP_STATUS.skipped;
   const found = step.issueIds.map((id) => issues.get(id)).filter((i): i is Issue => Boolean(i));
@@ -378,9 +407,13 @@ function StepRow({ step, issues, now, onJump, last }: { step: VerificationStep; 
           <span className="text-xs text-muted-foreground">{kind.label}{step.kind === "external" && step.detail ? ` · ${step.detail}` : ""}</span>
           <ToneBadge tone={status.tone} className="ml-auto">
             {step.status === "running" ? <Spinner className="size-3 text-current" /> : <StatusIcon />}
-            {status.label}
+            {step.status === "running" && step.note ? "Waiting" : status.label}
           </ToneBadge>
+          {step.status === "running" && step.kind === "external" && step.testerId ? (
+            <StopTesterButton busy={stopper.stopping === step.testerId} name={step.title} onClick={() => void stopper.stop(step.testerId!, step.title)} />
+          ) : null}
         </div>
+        {step.status === "running" && step.note ? <p className="text-xs text-amber-700 dark:text-amber-400">{step.note}</p> : null}
         <div className="flex flex-wrap items-center gap-x-2 text-xs text-muted-foreground">
           <time dateTime={step.startedAt} title={formatDateTime(step.startedAt)}>
             {formatTime(step.startedAt).slice(0, 5)}
@@ -411,7 +444,7 @@ function StepRow({ step, issues, now, onJump, last }: { step: VerificationStep; 
   );
 }
 
-function StepsTimeline({ data, onJump }: { data: VerificationResponse; onJump: (id: string) => void }) {
+function StepsTimeline({ data, onJump, stopper }: { data: VerificationResponse; onJump: (id: string) => void; stopper: StepStop }) {
   const running = data.steps.some((s) => s.status === "running");
   const now = useNow(running ? 1000 : 60_000);
   const issues = new Map(data.issues.map((i) => [i.id, i]));
@@ -430,7 +463,7 @@ function StepsTimeline({ data, onJump }: { data: VerificationResponse; onJump: (
             </h3>
             <ol className="grid">
               {steps.map((s, i) => (
-                <StepRow key={s.id} step={s} issues={issues} now={now} onJump={onJump} last={i === steps.length - 1} />
+                <StepRow key={s.id} step={s} issues={issues} now={now} onJump={onJump} last={i === steps.length - 1} stopper={stopper} />
               ))}
             </ol>
           </section>
@@ -569,7 +602,7 @@ function IssuesList({ data, filter, setFilter, highlight, onSet, onJumpDecision 
   );
 }
 
-function TesterRow({ projectId, taskId, tester, steps, onRan }: { projectId: string; taskId: string; tester: TesterConfig; steps: VerificationStep[]; onRan: () => void }) {
+function TesterRow({ projectId, taskId, tester, steps, onRan, stopper }: { projectId: string; taskId: string; tester: TesterConfig; steps: VerificationStep[]; onRan: () => void; stopper: StepStop }) {
   const [busy, setBusy] = useState(false);
   const mine = steps.filter((s) => s.kind === "external" && (s.testerId ? s.testerId === tester.id : s.detail === tester.name));
   const last = mine[mine.length - 1];
@@ -598,6 +631,7 @@ function TesterRow({ projectId, taskId, tester, steps, onRan }: { projectId: str
         <div className="flex flex-wrap gap-x-2 text-xs text-muted-foreground">
           <span>{tester.enabled ? WHEN_LABELS[tester.when] : "Only when you run it"}</span>
           <span>· {tester.blocking ? "Blocks the PR" : "Advisory"}</span>
+          {tester.queue ? <span title={`Runs one at a time with every other "${tester.queue}" tester, across all tasks`}>· one at a time ({tester.queue})</span> : null}
           {last && lastStatus ? (
             <span className={TONE_TEXT[lastStatus.tone]}>
               · Last run {formatTime(last.startedAt).slice(0, 5)}: {lastStatus.label.toLowerCase()}
@@ -605,10 +639,17 @@ function TesterRow({ projectId, taskId, tester, steps, onRan }: { projectId: str
           ) : null}
         </div>
       </div>
-      <Button size="sm" variant="outline" disabled={busy || running} onClick={() => void run()}>
-        {busy || running ? <Spinner className="size-3.5" /> : <Play />}
-        {running ? "Running…" : "Run now"}
-      </Button>
+      {running ? (
+        <span className="flex items-center gap-2 text-xs text-muted-foreground">
+          <Spinner className="size-3.5" /> {last?.note ? "Waiting…" : "Running…"}
+          <StopTesterButton busy={stopper.stopping === tester.id} name={tester.name} onClick={() => void stopper.stop(tester.id, tester.name)} />
+        </span>
+      ) : (
+        <Button size="sm" variant="outline" disabled={busy} onClick={() => void run()}>
+          {busy ? <Spinner className="size-3.5" /> : <Play />}
+          Run now
+        </Button>
+      )}
     </li>
   );
 }
@@ -631,6 +672,7 @@ export function ChecksTab({ projectId, taskId, verification }: { projectId: stri
   const [filter, setFilter] = useState<IssueFilter>("open");
   const [highlight, setHighlight] = useState<string | null>(null);
   const highlightTimer = useRef<number | undefined>(undefined);
+  const stopper = useStopTester(projectId, taskId, () => void load());
 
   useEffect(() => () => window.clearTimeout(highlightTimer.current), []);
 
@@ -685,7 +727,7 @@ export function ChecksTab({ projectId, taskId, verification }: { projectId: stri
             : `Round ${data.round}. ${open === 0 ? "No open issues" : `${open} open issue${open === 1 ? "" : "s"}`}${decisions ? `, ${decisions} decision${decisions === 1 ? "" : "s"} waiting for you` : ""}.`}
         </p>
         <SectionCard title={<><Radar className="size-4 text-muted-foreground" /> Steps</>} description="Each round: the agent changes the code, then checks, review and testers run. What they find goes back to the agent.">
-          <StepsTimeline data={data} onJump={jumpToIssue} />
+          <StepsTimeline data={data} onJump={jumpToIssue} stopper={stopper} />
         </SectionCard>
         <SectionCard title={<><CircleX className="size-4 text-muted-foreground" /> Issues</>} description="Dismiss an issue to tell the agent not to fix it and stop it from blocking the PR.">
           <IssuesList data={data} filter={filter} setFilter={setFilter} highlight={highlight} onSet={setIssue} onJumpDecision={jumpToDecision} />
@@ -708,7 +750,7 @@ export function ChecksTab({ projectId, taskId, verification }: { projectId: stri
           ) : (
             <ul className="divide-y rounded-lg border">
               {data.testers.map((t) => (
-                <TesterRow key={t.id} projectId={projectId} taskId={taskId} tester={t} steps={data.steps} onRan={() => void load()} />
+                <TesterRow key={t.id} projectId={projectId} taskId={taskId} tester={t} steps={data.steps} onRan={() => void load()} stopper={stopper} />
               ))}
             </ul>
           )}

@@ -78,6 +78,7 @@ const MAX_REVIEW_ROUNDS = 2;
 const VERSION = "0.2.0";
 const WORKING = new Set(["working", "fixing"]);
 const TESTERS_DIR = fileURLToPath(new URL("../testers/", import.meta.url)).replace(/\/$/, "");
+type TesterQueue = { holder: string | null; waiters: Array<{ label: string; onWait: (holder: string, ahead: number) => void; grant: () => void }> };
 const REJECT_PUSH = /^((don'?t|do not) push( yet)?|not yet)[.!]?$/i;
 const TASK_CACHE_MS = 3000;
 
@@ -496,6 +497,7 @@ export class Orchestrator {
     if (!run || !this.workspace.info(projectId, taskId).exists) throw new Error("The agent has not created this task's workspace yet");
     void (async () => {
       const r = await this.runTester(run, tester);
+      if (r.stopped) return;
       const fresh = this.store.getRun(run.id)!;
       if (r.decisions.length && !isActivePhase(fresh.phase)) await this.pauseForDecisions(fresh);
       else if (r.blocking.length && !isActivePhase(fresh.phase) && !["done", "failed", "stopped"].includes(fresh.phase)) {
@@ -509,7 +511,7 @@ export class Orchestrator {
         await this.pauseForDecisions(fresh);
       }
     })().catch((e) => this.log(`tester ${tester.name}: ${String(e)}`));
-    return { stepId: null, effect: `${tester.name} is running on the task's workspace.` };
+    return { stepId: null, effect: tester.queue ? `${tester.name} starts on the task's workspace when no other "${tester.queue}" tester runs.` : `${tester.name} is running on the task's workspace.` };
   }
 
   private ownerInstructions(run: Run): string {
@@ -1769,11 +1771,86 @@ export class Orchestrator {
     };
   }
 
-  async runTester(run: Run, tester: TesterConfig): Promise<{ blocking: Issue[]; decisions: Decision[] }> {
+  /** Running testers by step id, so the owner (or pausing/stopping the task) can stop them. */
+  private readonly testerRuns = new Map<string, { runId: string; testerId: string; controller: AbortController }>();
+  /** Queued testers (same `queue` name): who runs now and who waits, across all tasks and projects. */
+  private readonly testerQueues = new Map<string, TesterQueue>();
+
+  /** Waits for a turn in `queue`; resolves with a release function, or null when `signal` aborts first. `onWait` hears who runs and how many wait ahead. */
+  private acquireTesterQueue(queue: string, label: string, signal: AbortSignal, onWait: (holder: string, ahead: number) => void): Promise<(() => void) | null> {
+    const q = this.testerQueues.get(queue) ?? { holder: null, waiters: [] };
+    this.testerQueues.set(queue, q);
+    const tell = () => q.waiters.forEach((w, i) => w.onWait(q.holder ?? "", i));
+    const release = () => {
+      const next = q.waiters.shift();
+      q.holder = next?.label ?? null;
+      next?.grant();
+      tell();
+    };
+    if (q.holder === null) {
+      q.holder = label;
+      return Promise.resolve(release);
+    }
+    return new Promise((resolve) => {
+      const waiter: TesterQueue["waiters"][number] = { label, onWait, grant: () => resolve(release) };
+      q.waiters.push(waiter);
+      tell();
+      signal.addEventListener(
+        "abort",
+        () => {
+          const i = q.waiters.indexOf(waiter);
+          if (i < 0) return;
+          q.waiters.splice(i, 1);
+          tell();
+          resolve(null);
+        },
+        { once: true },
+      );
+    });
+  }
+
+  /** Stops the task's running (or queued) runs of a tester. */
+  stopTester(projectId: string, taskId: string, testerId: string): { stopped: number } {
+    const run = this.store.latestRunForTask(projectId, taskId);
+    const mine = [...this.testerRuns.values()].filter((t) => t.runId === run?.id && t.testerId === testerId);
+    if (!mine.length) throw Object.assign(new Error("This tester is not running for this task"), { status: 409 });
+    for (const t of mine) t.controller.abort("Stopped by you");
+    return { stopped: mine.length };
+  }
+
+  private stopTestersOf(runId: string, reason: string) {
+    for (const t of this.testerRuns.values()) if (t.runId === runId) t.controller.abort(reason);
+  }
+
+  async runTester(run: Run, tester: TesterConfig): Promise<{ blocking: Issue[]; decisions: Decision[]; stopped?: boolean }> {
     const ctx = this.runCtx(run);
     const task = await ctx.source.getTask(run.taskId);
     const step = this.vlog.startStep(run.id, "external", tester.name, tester.command, tester.id);
-    const res = await exec("sh", ["-c", tester.command], { cwd: run.worktree, timeoutMs: tester.timeoutMs ?? 30 * 60_000, env: this.testerEnv(run, task) });
+    const controller = new AbortController();
+    this.testerRuns.set(step, { runId: run.id, testerId: tester.id, controller });
+    let release: (() => void) | null = null;
+    let res: { code: number; stdout: string; stderr: string };
+    try {
+      if (tester.queue) {
+        const label = `${run.taskId} (${ctx.project.name})`;
+        release = await this.acquireTesterQueue(tester.queue, label, controller.signal, (holder, ahead) =>
+          this.vlog.noteStep(run.id, step, `Waiting: ${holder} is running a "${tester.queue}" tester${ahead ? `, ${ahead} more ahead` : ""}. It starts when they finish.`),
+        );
+        this.vlog.noteStep(run.id, step, null);
+      }
+      res = controller.signal.aborted
+        ? { code: -1, stdout: "", stderr: "" }
+        : await exec("sh", ["-c", tester.command], { cwd: run.worktree, timeoutMs: tester.timeoutMs ?? 30 * 60_000, env: this.testerEnv(run, task), signal: controller.signal, group: true });
+    } finally {
+      release?.();
+      this.testerRuns.delete(step);
+    }
+    if (controller.signal.aborted) {
+      const reason = String(controller.signal.reason ?? "Stopped");
+      this.vlog.finishStep(run.id, step, "skipped", { detail: reason, output: `$ ${tester.command}\n${res.stdout}\n${res.stderr}`.trim() });
+      this.event(run.id, "info", `${tester.name}: ${reason.toLowerCase()}`);
+      return { blocking: [], decisions: [], stopped: true };
+    }
     const parsed = parseTesterOutput(tester.format, tester.name, res.stdout, res.stderr, res.code);
     const output = `$ ${tester.command}\n${res.stdout}\n${res.stderr}`.trim();
     if (!parsed.ranOk) {
@@ -1886,9 +1963,16 @@ export class Orchestrator {
       }
       return null;
     };
+    // A tester stopped because the task was paused or stopped ends this pass; one the owner stopped alone is skipped.
+    const halted = (r: { stopped?: boolean }) => {
+      if (!r.stopped) return false;
+      const fresh = this.store.getRun(run.id);
+      return !fresh || fresh.paused || !isActivePhase(fresh.phase);
+    };
     for (const t of testers.filter((x) => x.when === "every-round")) {
       this.update(run.id, { activity: `Running ${t.name}` });
       const r = await this.runTester(run, t);
+      if (halted(r)) return false;
       const h = await handle(r.blocking, r.decisions);
       if (h !== null) return h;
     }
@@ -1902,6 +1986,7 @@ export class Orchestrator {
     for (const t of testers.filter((x) => x.when === "before-pr")) {
       this.update(run.id, { activity: `Running ${t.name}` });
       const r = await this.runTester(run, t);
+      if (halted(r)) return false;
       const h = await handle(r.blocking, r.decisions);
       if (h !== null) return h;
     }
@@ -2165,6 +2250,7 @@ export class Orchestrator {
     if (action === "pause") {
       if (["done", "failed", "stopped"].includes(run.phase) || run.paused) throw new Error(`cannot pause a ${run.paused ? "paused" : run.phase} run`);
       const updated = this.update(runId, { paused: true, slot: null, activity: "Paused" });
+      this.stopTestersOf(runId, "Stopped: the task was paused");
       if (run.conversationId && isActivePhase(run.phase)) await this.runner.abort(run.conversationId).catch(() => {});
       this.event(runId, "info", "Paused by operator");
       return updated;
@@ -2192,6 +2278,7 @@ export class Orchestrator {
       if (["done", "stopped"].includes(run.phase)) throw new Error(`run already ${run.phase}`);
       if (run.conversationId) await this.runner.abort(run.conversationId).catch(() => {});
       const updated = this.update(runId, { phase: "stopped", paused: false, slot: null, activity: null });
+      this.stopTestersOf(runId, "Stopped: the task was stopped");
       await this.comment(runId, `stopped:${runId}`, "Stopped by the Nightshift operator.").catch(() => {});
       await this.setTaskStatus(runId, "failed", ":stopped").catch(() => {});
       await this.releaseLease(runId);

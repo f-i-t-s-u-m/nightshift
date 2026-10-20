@@ -50,6 +50,8 @@ export type VerificationStep = {
   detail?: string;
   output?: string;
   testerId?: string;
+  /** What a running step is waiting for, e.g. another task's run of the same queued tester. */
+  note?: string;
   issueIds: string[];
 };
 
@@ -65,6 +67,8 @@ export type TesterConfig = {
   blocking: boolean;
   enabled: boolean;
   timeoutMs?: number;
+  /** Testers with the same queue name run one at a time across all tasks and projects (e.g. "umbra": the Umbra server takes one review at a time). Waiting does not count toward the timeout. */
+  queue?: string;
 };
 
 export type TesterPreset = Omit<TesterConfig, "id" | "enabled"> & { presetId: string; description: string };
@@ -101,6 +105,7 @@ export const TESTER_PRESETS: TesterPreset[] = [
     when: "before-pr",
     blocking: true,
     timeoutMs: 75 * 60_000,
+    queue: "umbra",
   },
   {
     presetId: "json",
@@ -168,5 +173,7 @@ export const VERIFY_ROUTES = {
   issue: (p: string, t: string, id: string) => `/api/projects/${encodeURIComponent(p)}/tasks/${encodeURIComponent(t)}/issues/${encodeURIComponent(id)}`,
   runTester: (p: string, t: string, testerId: string) =>
     `/api/projects/${encodeURIComponent(p)}/tasks/${encodeURIComponent(t)}/testers/${encodeURIComponent(testerId)}/run`,
+  stopTester: (p: string, t: string, testerId: string) =>
+    `/api/projects/${encodeURIComponent(p)}/tasks/${encodeURIComponent(t)}/testers/${encodeURIComponent(testerId)}/stop`,
   triggers: (p: string) => `/api/projects/${encodeURIComponent(p)}/triggers`,
 } as const;

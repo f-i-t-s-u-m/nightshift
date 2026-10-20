@@ -51,6 +51,7 @@ const fromPreset = (p: TesterPreset): TesterConfig => ({
   blocking: p.blocking,
   enabled: true,
   ...(p.timeoutMs ? { timeoutMs: p.timeoutMs } : {}),
+  ...(p.queue ? { queue: p.queue } : {}),
 });
 
 function TesterEditor({ tester, prefix, onChange, onRemove }: { tester: TesterConfig; prefix: string; onChange: (patch: Partial<TesterConfig>) => void; onRemove: () => void }) {
@@ -118,6 +119,18 @@ function TesterEditor({ tester, prefix, onChange, onRemove }: { tester: TesterCo
               onChange({ timeoutMs: e.target.value && Number.isFinite(n) && n > 0 ? Math.round(n * 60_000) : undefined });
             }}
             placeholder="None"
+          />
+        </Field>
+        <Field id={id("queue")} className="sm:col-span-3" label="One at a time" hint="Testers with the same name here run one after another across all tasks; waiting does not count toward the timeout.">
+          <Input
+            id={id("queue")}
+            className="font-mono"
+            value={tester.queue ?? ""}
+            onChange={(e) => onChange({ queue: e.target.value.trim() ? e.target.value.toLowerCase().replace(/\s+/g, "-") : undefined })}
+            placeholder="No queue (parallel)"
+            maxLength={40}
+            aria-describedby={`${id("queue")}-hint`}
+            spellCheck={false}
           />
         </Field>
       </div>

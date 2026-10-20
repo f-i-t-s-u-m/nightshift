@@ -501,7 +501,7 @@ export function startHttp(options: {
         if (!orchestrator.projects.has(id)) return send(res, 404, { error: "Project not found" });
         return send(res, 200, await orchestrator.branches(id, url.searchParams.get("q") || undefined));
       }
-      const verifyMatch = p.match(/^\/api\/projects\/([^/]+)\/tasks\/([^/]+)\/(decisions|issues|testers)\/([^/]+)(\/run)?$/);
+      const verifyMatch = p.match(/^\/api\/projects\/([^/]+)\/tasks\/([^/]+)\/(decisions|issues|testers)\/([^/]+)(\/run|\/stop)?$/);
       if (verifyMatch && req.method === "POST") {
         const [projectId, taskId, kind, id] = [verifyMatch[1], verifyMatch[2], verifyMatch[3], verifyMatch[4]].map(decodeURIComponent);
         if (!orchestrator.projects.has(projectId)) return send(res, 404, { error: "Project not found" });
@@ -509,6 +509,7 @@ export function startHttp(options: {
           const body = await readJson(req);
           if (kind === "decisions") return send(res, 200, await orchestrator.answerDecision(projectId, taskId, id, String(body.answer ?? "")));
           if (kind === "issues") return send(res, 200, { issue: orchestrator.setIssueStatus(projectId, taskId, id, body.status === "open" ? "open" : "dismissed") });
+          if (kind === "testers" && verifyMatch[5] === "/stop") return send(res, 200, orchestrator.stopTester(projectId, taskId, id));
           if (kind === "testers" && verifyMatch[5]) return send(res, 200, await orchestrator.runTesterNow(projectId, taskId, id));
         } catch (error) {
           return send(res, (error as { status?: number }).status ?? 400, { error: error instanceof Error ? error.message : String(error) });

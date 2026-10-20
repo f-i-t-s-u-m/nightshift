@@ -53,12 +53,22 @@ export class VerificationLog {
     });
   }
 
+  noteStep(runId: string, stepId: string, note: string | null) {
+    this.mutate(runId, (d) => {
+      const s = d.steps.find((x) => x.id === stepId);
+      if (!s) return;
+      if (note) s.note = note;
+      else delete s.note;
+    });
+  }
+
   finishStep(runId: string, stepId: string, status: StepStatus, extra: { detail?: string; output?: string; issueIds?: string[]; title?: string } = {}) {
     this.mutate(runId, (d) => {
       const s = d.steps.find((x) => x.id === stepId);
       if (!s) return;
       s.status = status;
       s.endedAt = new Date().toISOString();
+      delete s.note;
       if (extra.detail !== undefined) s.detail = extra.detail;
       if (extra.output !== undefined) s.output = extra.output.slice(-20_000);
       if (extra.title) s.title = extra.title;

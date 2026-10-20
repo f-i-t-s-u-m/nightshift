@@ -1712,9 +1712,10 @@ try {
     const { createServer } = await import("node:http");
     const posts: Array<Record<string, unknown>> = [];
     const clients = new Set<import("node:http").ServerResponse>();
-    let mode: "ok" | "fail" = "ok";
+    let mode: "ok" | "fail" | "slow" = "ok";
     let ready = false;
     let runs = 0;
+    const cancels: string[] = [];
     const emit = (ev: Record<string, unknown>) => {
       for (const c of clients) c.write(`data: ${JSON.stringify(ev)}\n\n`);
     };
@@ -1740,7 +1741,7 @@ try {
         const runId = `rev_pb_${++runs}`;
         ready = false;
         setTimeout(() => emit({ kind: "phase", runId, phase: "crawling" }), 200);
-        setTimeout(() => {
+        if (mode !== "slow") setTimeout(() => {
           if (mode === "fail") emit({ kind: "run.failed", runId, error: "sandbox exploded", detail: { cause: "Docker is not running" } });
           else {
             emit({ kind: "run.done", runId });
@@ -1758,7 +1759,14 @@ try {
           findings: [f("Count overflows past 255", "major", "verified", 2), f("Typo in heading", "nit", "verified", 1), f("Should the limit be configurable", "major", "insufficient", null), f("Imagined race", "minor", "rejected", 3)],
         });
       }
-      if (u.pathname === "/api/cancel") return json(200, { ok: true });
+      if (u.pathname === "/api/cancel") {
+        let raw = "";
+        for await (const c of req) raw += c;
+        const { runId } = JSON.parse(raw) as { runId: string };
+        cancels.push(runId);
+        emit({ kind: "run.failed", runId, error: "cancelled" });
+        return json(200, { ok: true });
+      }
       json(404, { error: "not found" });
     });
     await new Promise<void>((r) => fake.listen(0, "127.0.0.1", () => r()));
@@ -1813,7 +1821,40 @@ try {
         return last && last.id !== step!.id && last.status !== "running" ? last : null;
       }, 30_000);
       if (failed.status !== "failed" || !failed.detail?.includes("Could not run") || !failed.detail.includes("sandbox exploded")) throw new Error(JSON.stringify(failed));
-      return `waited out "already active", sent merge-base ${mergeBase.slice(0, 8)}..${headSha.slice(0, 8)} of the worktree; ${step!.detail}; verified major → blocking issue, nit → info, undecided → decision, refuted left out; a failed Umbra run shows as "${failed.detail.slice(0, 90)}…"`;
+
+      // Two tasks, one queued tester each: one reaches Umbra, the other waits; Stop and Pause end them and cancel the Umbra run.
+      mode = "slow";
+      await post("/api/projects/pinned/tasks", { title: "Say hello again", body: "Add another hello note." });
+      await waitFor("pinned T-2 PR", async () => ((await get<{ run: Run | null }>("/api/projects/pinned/tasks/T-2")).run?.prNumber ? true : null), 40_000);
+      await (await fetch(`${base}/api/projects/pinned`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ testers: [{ ...tester, queue: "Umbra" }] }) })).json();
+      const lastStep = async (t: string) => (await get<VerificationResponse>(`/api/projects/pinned/tasks/${t}/verification`)).steps.filter((x) => x.testerId === "umbra-sub").at(-1);
+      const before = { t1: (await lastStep("T-1"))?.id, t2: (await lastStep("T-2"))?.id };
+      const postsBefore = posts.length;
+      await post("/api/projects/pinned/tasks/T-1/testers/umbra-sub/run");
+      await waitFor("T-1 at Umbra", async () => (posts.length === postsBefore + 1 ? true : null), 15_000);
+      await post("/api/projects/pinned/tasks/T-2/testers/umbra-sub/run");
+      const waiting = await waitFor("T-2 queued", async () => {
+        const st = await lastStep("T-2");
+        return st && st.id !== before.t2 && st.status === "running" && st.note ? st : null;
+      }, 15_000);
+      await new Promise((r) => setTimeout(r, 1500));
+      if (posts.length !== postsBefore + 1 || !waiting.note!.includes("T-1 (Pinned)")) throw new Error(JSON.stringify({ posts: posts.length - postsBefore, note: waiting.note }));
+      const stopped = await post<{ stopped?: number }>("/api/projects/pinned/tasks/T-1/testers/umbra-sub/stop");
+      const t1 = await waitFor("T-1 stopped", async () => {
+        const st = await lastStep("T-1");
+        return st && st.id !== before.t1 && st.status === "skipped" ? st : null;
+      }, 20_000);
+      await waitFor("T-2 at Umbra", async () => (posts.length === postsBefore + 2 && !(await lastStep("T-2"))?.note ? true : null), 20_000);
+      const t2Run = (await get<{ run: Run }>("/api/projects/pinned/tasks/T-2")).run;
+      await post(`/api/runs/${t2Run.id}/pause`);
+      const t2 = await waitFor("T-2 stopped by pause", async () => {
+        const st = await lastStep("T-2");
+        return st && st.id === waiting.id && st.status === "skipped" ? st : null;
+      }, 20_000);
+      await post(`/api/runs/${t2Run.id}/resume`);
+      const nothing = await fetch(`${base}/api/projects/pinned/tasks/T-1/testers/umbra-sub/stop`, { method: "POST" });
+      if (stopped.stopped !== 1 || t1.detail !== "Stopped by you" || !t2.detail?.includes("paused") || cancels.length !== 2 || nothing.status !== 409) throw new Error(JSON.stringify({ stopped, t1: t1.detail, t2: t2.detail, cancels, nothing: nothing.status }));
+      return `waited out "already active", sent merge-base ${mergeBase.slice(0, 8)}..${headSha.slice(0, 8)} of the worktree; ${step!.detail}; verified major → blocking issue, nit → info, undecided → decision, refuted left out; a failed Umbra run shows as "${failed.detail.slice(0, 90)}…"; with queue "umbra" two tasks ran one at a time (T-2: "${waiting.note!.slice(0, 60)}…"), Stop ended T-1 and cancelled its Umbra run, then T-2 started and pausing its task stopped it (2 cancels sent)`;
     } finally {
       for (const c of clients) c.end();
       fake.close();
