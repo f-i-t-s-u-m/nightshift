@@ -43,6 +43,38 @@ export type DatabaseConfig =
 
 export type PreviewStatus = "stopped" | "starting" | "running" | "failed";
 
+/** Where a preview service's env value comes from, lowest priority first. */
+export type EnvSource = "task" | "apps" | "preview" | "rewrite" | "service" | "port";
+
+export type EnvEntry = { key: string; value: string; source: EnvSource; secret: boolean };
+
+/** A value in a `.env` file the app's framework loads itself; `overriddenBy` is set when Nightshift passes the same key. */
+export type EnvFileEntry = { file: string; key: string; value: string; secret: boolean; overriddenBy: EnvSource | null };
+
+/** `GET …/workspace/preview/env?service=`: the env a service started with, the env it would get now, and its `.env` files. */
+export type ServiceEnvResponse = {
+  service: string;
+  status: PreviewStatus;
+  startedAt: string | null;
+  /** What the running process got; null when it is not running. */
+  running: EnvEntry[] | null;
+  /** What it gets on its next start. Ports of apps that never started show as templates. */
+  next: EnvEntry[];
+  files: EnvFileEntry[];
+  /** Keys whose value differs between `running` and `next`: restart the service to apply them. */
+  changed: string[];
+  revealed: boolean;
+  /** This app's own env as saved in the project settings, templates unfilled (secrets masked unless revealed). */
+  own: Record<string, string>;
+  /** Keys Nightshift sets last (port, host): an own value for them would be ignored. */
+  locked: string[];
+  /** Templates this app can use in a value, such as `{{api.publicUrl}}`. */
+  templates: string[];
+};
+
+/** `PUT …/workspace/preview/env?service=`: changes the app's own env in the project settings. */
+export type ServiceEnvUpdate = { set?: Record<string, string>; remove?: string[] };
+
 export type PreviewServiceInfo = {
   name: string;
   primary: boolean;
@@ -213,6 +245,10 @@ export const WORKSPACE_ROUTES = {
   base: (p: string, t: string) => `/api/projects/${encodeURIComponent(p)}/tasks/${encodeURIComponent(t)}/workspace`,
   preview: (p: string, t: string, action: "start" | "stop" | "restart", service?: string) =>
     `${WORKSPACE_ROUTES.base(p, t)}/preview/${action}${service ? `?service=${encodeURIComponent(service)}` : ""}`,
+  previewEnv: (p: string, t: string, service?: string, reveal = false) => {
+    const q = new URLSearchParams({ ...(service ? { service } : {}), ...(reveal ? { reveal: "1" } : {}) }).toString();
+    return `${WORKSPACE_ROUTES.base(p, t)}/preview/env${q ? `?${q}` : ""}`;
+  },
   previewLogs: (p: string, t: string, service?: string) => `${WORKSPACE_ROUTES.base(p, t)}/preview/logs${service ? `?service=${encodeURIComponent(service)}` : ""}`,
   database: (p: string, t: string, action: "create" | "reset" | "drop") => `${WORKSPACE_ROUTES.base(p, t)}/database/${action}`,
   files: (p: string, t: string, dir = "") => `${WORKSPACE_ROUTES.base(p, t)}/files?path=${encodeURIComponent(dir)}`,

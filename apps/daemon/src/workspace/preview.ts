@@ -4,7 +4,7 @@ import { connect, createServer } from "node:net";
 import { networkInterfaces } from "node:os";
 import path from "node:path";
 import { defaultImage, inferInstall } from "./local-files.ts";
-import type { DeviceMode, PreviewConfig, PreviewDiagnosis, PreviewInfo, PreviewService, PreviewServiceInfo, PreviewTarget } from "@nightshift/core";
+import type { DeviceMode, EnvEntry, EnvSource, PreviewConfig, PreviewDiagnosis, PreviewInfo, PreviewService, PreviewServiceInfo, PreviewTarget } from "@nightshift/core";
 
 type Svc = {
   name: string;
@@ -22,6 +22,8 @@ type Svc = {
   startedAt: string | null;
   error: string | null;
   log: string[];
+  /** The env the current process was started with (values unmasked). */
+  env: EnvEntry[] | null;
 };
 
 type Group = {
@@ -129,6 +131,34 @@ export function tcpProbe(port: number, host = "127.0.0.1", timeoutMs = 1500): Pr
     });
     socket.once("error", () => done(false));
   });
+}
+
+const SECRET_KEY = /SECRET|TOKEN|PASSWORD|PASSWD|PRIVATE|CREDENTIAL|API_?KEY|ACCESS_?KEY|_KEY$|^KEY$|SALT|SIGNING/i;
+
+export const isSecretKey = (key: string) => SECRET_KEY.test(key);
+
+/** The env layers a service gets, in the order they override each other (later wins). */
+function envEntries(
+  d: PreviewService,
+  config: PreviewConfig,
+  env: Record<string, string>,
+  crossEnv: Record<string, string>,
+  fill: (value: string) => string,
+  own: Record<string, string>,
+): EnvEntry[] {
+  const out = new Map<string, EnvEntry>();
+  const put = (source: EnvSource, values: Record<string, string> | undefined, filled = false) => {
+    for (const [key, value] of Object.entries(values ?? {})) {
+      out.delete(key);
+      out.set(key, { key, value: filled ? fill(value) : value, source, secret: isSecretKey(key) });
+    }
+  };
+  put("task", env);
+  put("apps", crossEnv);
+  put("preview", config.env, true);
+  put("service", d.env, true);
+  put("port", own);
+  return [...out.values()];
 }
 
 export class PreviewManager {
@@ -323,6 +353,7 @@ export class PreviewManager {
           startedAt: null,
           error: null,
           log: [],
+          env: null,
         });
       }
     }
@@ -348,7 +379,10 @@ export class PreviewManager {
     const base = previewHost(g.projectId, g.taskId);
     const sg = g.taskId === SHARED ? null : this.groups.get(this.key(g.projectId, SHARED));
     const entries = [
-      ...defs.map((d) => ({ d, s: g.services.get(d.name)! })),
+      ...defs.flatMap((d) => {
+        const s = g.services.get(d.name);
+        return s ? [{ d, s }] : [];
+      }),
       ...[...(sg?.services.values() ?? [])].map((s) => ({ d: { name: s.name, primary: false } as PreviewService & { primary: boolean }, s })),
     ];
     for (const { d, s } of entries) {
@@ -420,8 +454,9 @@ export class PreviewManager {
         s.lanUrl = `http://${lan}:${s.port}/`;
         if (g.deviceMode === "expo-go" && /expo start/.test(command)) s.deviceUrl = `exp://${lan}:${s.port}`;
       }
-      const ownEnv = Object.fromEntries(Object.entries({ ...config.env, ...d.env }).map(([k, v]) => [k, fill(v)]));
-      const extraEnv: Record<string, string> = { ...env, ...crossEnv, ...ownEnv, [portEnv]: String(s.inner), BROWSER: "none" };
+      const host = g.target === "device" || inContainer ? "0.0.0.0" : "127.0.0.1";
+      s.env = envEntries(d, config, env, crossEnv, fill, { [portEnv]: String(s.inner), BROWSER: "none", HOST: host });
+      const extraEnv: Record<string, string> = Object.fromEntries(s.env.filter((e) => e.key !== "HOST").map((e) => [e.key, e.value]));
       const cwd = path.join(root, d.cwd ?? "");
       let child: ChildProcess;
       if (inContainer) {
@@ -570,6 +605,40 @@ export class PreviewManager {
     }
   }
 
+
+  runningEnv(projectId: string, taskId: string, service: string): EnvEntry[] | null {
+    const s = this.svcOf(projectId, taskId, service);
+    return s && s.status !== "stopped" && s.env ? s.env : null;
+  }
+
+  /** The env `service` gets on its next start, with the ports known now. */
+  plannedEnv(projectId: string, taskId: string, config: PreviewConfig, env: Record<string, string>, service: string): EnvEntry[] {
+    const all = servicesOf(config);
+    const d = all.find((x) => x.name === service);
+    if (!d) throw new Error(`No preview service named ${service}`);
+    const groupTask = d.shared ? SHARED : taskId;
+    const defs = all.filter((x) => Boolean(x.shared) === Boolean(d.shared));
+    const target = config.target ?? "machine";
+    const g: Group = this.groups.get(this.key(projectId, groupTask)) ?? {
+      key: this.key(projectId, groupTask),
+      projectId,
+      taskId: groupTask,
+      target,
+      deviceMode: null,
+      services: new Map(),
+      installing: false,
+      installed: false,
+      installChild: null,
+      installLog: [],
+    };
+    const { vars, env: crossEnv } = this.templateVars(g, defs, target === "device" ? lanAddress() : null);
+    const fill = (value: string) => value.replace(/\{\{\s*([\w-]+\.(?:url|publicUrl|port|lanUrl|host))\s*\}\}/g, (m, k: string) => vars[k] ?? m);
+    const s = g.services.get(d.name);
+    const inContainer = target === "container" || (d.target === "container" && target !== "device");
+    const inner = s?.inner || (inContainer ? d.containerPort : undefined) || s?.port;
+    const host = target === "device" || inContainer ? "0.0.0.0" : "127.0.0.1";
+    return envEntries(d, config, d.shared ? {} : env, crossEnv, fill, { [d.portEnv ?? "PORT"]: inner ? String(inner) : "(a free port, picked at start)", BROWSER: "none", HOST: host });
+  }
 
   forget(projectId: string, taskId: string) {
     this.groups.delete(this.key(projectId, taskId));

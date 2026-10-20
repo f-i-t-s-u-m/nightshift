@@ -1593,13 +1593,34 @@ try {
     const seen = JSON.parse(body) as { api: string; secret: string };
     const apiPublic = running.find((s) => s.name === "api")!.url!.replace(/\/$/, "");
     if (seen.api !== `${apiPublic}/v1` || seen.secret !== "websecret") throw new Error(`web saw ${body}, api is ${apiPublic}`);
+    type EnvView = { running: Array<{ key: string; value: string; source: string }> | null; next: Array<{ key: string; value: string; source: string }>; files: Array<{ file: string; key: string; value: string; overriddenBy: string | null }>; changed: string[] };
+    const env1 = await get<EnvView>(`${W}/preview/env?service=web`);
+    const apiVar = env1.running?.find((e) => e.key === "NEXT_PUBLIC_API_URL");
+    const fileSecret = env1.files.find((f) => f.file === "apps/web/.env.local" && f.key === "SECRET");
+    const fileApi = env1.files.find((f) => f.key === "NEXT_PUBLIC_API_URL");
+    if (apiVar?.value !== `${apiPublic}/v1` || apiVar.source !== "rewrite" || env1.changed.length || fileSecret?.value !== "••••••••" || fileSecret.overriddenBy !== null || fileApi?.overriddenBy !== "rewrite" || JSON.stringify(env1).includes("websecret"))
+      throw new Error(JSON.stringify(env1));
+    const revealed = await get<EnvView>(`${W}/preview/env?service=web&reveal=1`);
+    if (revealed.files.find((f) => f.key === "SECRET")?.value !== "websecret") throw new Error(JSON.stringify(revealed.files));
+    await (await fetch(`${base}/api/projects/envs`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ preview: { command: "node server.cjs", services: [{ name: "api", cwd: "apps/api", command: "node server.cjs" }, { name: "web", cwd: "apps/web", command: "node server.cjs", primary: true, env: { FEATURE_FLAG: "on" } }] } }) })).json();
+    const env2 = await get<EnvView>(`${W}/preview/env?service=web`);
+    if (env2.changed.join() !== "FEATURE_FLAG" || env2.next.find((e) => e.key === "FEATURE_FLAG")?.source !== "service") throw new Error(JSON.stringify(env2.changed));
+    const putEnv = (update: unknown) => fetch(`${base}${W}/preview/env?service=web`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(update) });
+    const set = (await (await putEnv({ set: { NEXT_PUBLIC_API_URL: "{{api.url}}/v2" } })).json()) as EnvView & { own: Record<string, string> };
+    const own = set.next.find((e) => e.key === "NEXT_PUBLIC_API_URL");
+    if (own?.source !== "service" || own.value !== `${env1.running!.find((e) => e.key === "NIGHTSHIFT_API_URL")!.value}/v2` || set.own.NEXT_PUBLIC_API_URL !== "{{api.url}}/v2" || !set.changed.includes("NEXT_PUBLIC_API_URL") || set.own.FEATURE_FLAG !== "on")
+      throw new Error(JSON.stringify({ own, saved: set.own, changed: set.changed }));
+    const refused = await Promise.all([putEnv({ set: { PORT: "1" } }), putEnv({ set: { "1BAD": "x" } }), putEnv({ set: { SECRET: "••••••••" } })]);
+    if (refused.some((r) => r.status !== 400)) throw new Error(`refused ${refused.map((r) => r.status)}`);
+    const removed = (await (await putEnv({ remove: ["NEXT_PUBLIC_API_URL", "FEATURE_FLAG"] })).json()) as EnvView & { own: Record<string, string> };
+    if (Object.keys(removed.own).length || removed.next.find((e) => e.key === "NEXT_PUBLIC_API_URL")?.source !== "rewrite" || removed.changed.length) throw new Error(JSON.stringify(removed.own));
     await post(`${W}/preview/stop`);
     put(envs.repo, ".env", "SECRET=rotated\nAPI_URL=http://localhost:4000\n");
     const before = await get<{ localFiles: { changed: string[]; present: string[] } | null }>(W);
     const synced = await post<{ copied: string[]; status: { changed: string[] } }>(`${W}/local-files/sync`, { overwrite: true });
     if (before.localFiles?.changed.join() !== ".env" || !synced.copied.includes(".env") || synced.status.changed.length || readFileSync(path.join(r.worktree, ".env"), "utf8").indexOf("rotated") < 0)
       throw new Error(JSON.stringify({ before: before.localFiles, synced }));
-    return `scan found ${paths} (no values exposed) and 2 rewrites; agent: read blocked, cat blocked, told in its prompt; nothing committed; web got NEXT_PUBLIC_API_URL=${seen.api} and its own SECRET; changed .env detected and synced`;
+    return `scan found ${paths} (no values exposed) and 2 rewrites; agent: read blocked, cat blocked, told in its prompt; nothing committed; web got NEXT_PUBLIC_API_URL=${seen.api} and its own SECRET; env view shows the rewrite, masks the file's SECRET until revealed, and flags FEATURE_FLAG as changed since start; a variable set from the panel (template filled) overrides the rewrite, PORT/bad names/masked values are refused, removing restores the rewrite; changed .env detected and synced`;
   });
 
   await check("An app that hard-codes port 3000 runs in its own container, so two tasks can preview it at the same time", async () => {

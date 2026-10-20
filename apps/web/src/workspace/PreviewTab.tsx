@@ -31,6 +31,7 @@ import { NoWorkspace, copyText, useWorkspaceRefresh, type WorkspaceTabProps } fr
 import { HintLine, ProblemPanel, hasProblem } from "./PreviewProblem";
 import { DetectingPanel, SetupPanel, suggestionServices } from "./PreviewSetup";
 import { LocalFilesCard, LocalFilesHintCard, useLocalFilesHint } from "./LocalFilesCard";
+import { EnvButton } from "./ServiceEnv";
 
 const LOG_POLL_MS = 3000;
 
@@ -320,8 +321,12 @@ function ServiceRow({
   onAction,
   fixer,
   container,
+  projectId,
+  taskId,
 }: {
   container: { port: number | null } | null;
+  projectId: string;
+  taskId: string;
   service: PreviewServiceInfo;
   preview: PreviewInfo;
   busy: string | null;
@@ -381,6 +386,7 @@ function ServiceRow({
             <SquareTerminal />
             <span className="hidden sm:inline">Console</span>
           </Button>
+          <EnvButton projectId={projectId} taskId={taskId} service={service.name} label={service.name} onRestart={() => onAction("restart", service.name)} />
           {hasDevice ? (
             <Tooltip>
               <TooltipTrigger asChild>
@@ -539,6 +545,7 @@ function SharedServiceRow({
               <SquareTerminal />
               <span className="hidden sm:inline">Console</span>
             </Button>
+            {service.external ? null : <EnvButton projectId={projectId} taskId={taskId} service={service.name} label={service.name} onRestart={() => run("restart")} />}
             {service.external ? null : (
               <>
                 <ActionButton label={`Start ${service.name} for the project`} icon={<Play />} busy={key("start")} disabled={busy !== null || live} onClick={() => run("start")} />
@@ -707,6 +714,8 @@ function MultiPreview({
               onAction={onAction}
               fixer={fixer}
               container={s.name in containers && (preview.target !== "container" || containers[s.name] !== null) ? { port: containers[s.name] } : null}
+              projectId={projectId}
+              taskId={taskId}
             />
           ))}
         </ul>
@@ -779,8 +788,12 @@ function SinglePreview({
   logError,
   fixer,
   containerPort,
+  projectId,
+  taskId,
 }: {
   containerPort: number | null;
+  projectId: string;
+  taskId: string;
   preview: PreviewInfo;
   service: PreviewServiceInfo;
   busy: string | null;
@@ -840,6 +853,7 @@ function SinglePreview({
         <Button size="sm" variant="outline" disabled={busy !== null || !live} onClick={() => onAction("stop")}>
           {busy === "stop" ? <Spinner className="size-3" /> : <Square />} Stop
         </Button>
+        <EnvButton projectId={projectId} taskId={taskId} label="The preview" onRestart={() => onAction("restart")} />
       </div>
       {problem ? (
         <ProblemPanel service={service} label="The preview" install={preview.install} onDiagnose={() => fixer.diagnose()} onApplyFix={(fix) => fixer.applyFix(fix)} onAskAgent={fixer.askAgent} />
@@ -1426,6 +1440,8 @@ export default function PreviewTab({ projectId, taskId, ws, workspace, active, o
                 preview={preview}
                 service={singleService(preview)}
                 containerPort={singleContainerPort(projectPreview, containers)}
+                projectId={projectId}
+                taskId={taskId}
                 busy={busy}
                 log={log}
                 logError={logError}

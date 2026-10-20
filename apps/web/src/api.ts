@@ -1,5 +1,7 @@
 import { FS_ROUTES, GITHUB_ROUTES as G, LOCAL_FILES_ROUTES as L, SKILL_ROUTES as K, VERIFY_ROUTES as V, type FsListResponse, type FsMkdirResponse } from "@nightshift/core";
 import type {
+  ServiceEnvResponse,
+  ServiceEnvUpdate,
   DeleteProjectResponse,
   LimitsResponse,
   RunLimits,
@@ -206,6 +208,9 @@ export const workspaceApi = (p: string, t: string) => ({
   info: () => request<WorkspaceInfo>(W.base(p, t)),
   preview: (action: "start" | "stop" | "restart", service?: string) => post<WorkspaceInfo>(W.preview(p, t, action, service)),
   previewLogs: (service?: string) => request<{ log: string }>(W.previewLogs(p, t, service)),
+  previewEnv: (service?: string, reveal = false) => request<ServiceEnvResponse>(W.previewEnv(p, t, service, reveal)),
+  setPreviewEnv: (service: string | undefined, update: ServiceEnvUpdate) =>
+    request<ServiceEnvResponse>(W.previewEnv(p, t, service), { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(update) }),
   previewDiagnose: (service?: string) => post<PreviewDiagnosis>(W.previewDiagnose(p, t, service)),
   previewFix: (fix: PreviewFix, service?: string) => post<WorkspaceInfo>(W.previewFix(p, t, service), { fix }),
   previewDetect: (signal?: AbortSignal) =>

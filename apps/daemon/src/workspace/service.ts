@@ -1,16 +1,17 @@
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { createServer } from "node:net";
 import path from "node:path";
-import type { ActionRun, ActionsResponse, LocalFilesScan, LocalFilesSyncResult, NightshiftConfig, PreviewConfig, PreviewDetectResponse, PreviewDiagnosis, PreviewFix, Project, Run, WorkspaceInfo } from "@nightshift/core";
+import type { ActionRun, ActionsResponse, LocalFilesScan, LocalFilesSyncResult, NightshiftConfig, PreviewConfig, PreviewDetectResponse, PreviewDiagnosis, PreviewFix, Project, Run, ServiceEnvResponse, ServiceEnvUpdate, WorkspaceInfo } from "@nightshift/core";
+import type { EnvEntry } from "@nightshift/core";
 import { isActivePhase } from "@nightshift/core";
 import { GithubPrHost, run as exec, WorktreeOps } from "@nightshift/git";
 import type { Store } from "@nightshift/store";
 import { DatabaseManager } from "./database.ts";
 import { commitAuthor } from "../identity.ts";
-import { PreviewManager, previewHost, servicesOf } from "./preview.ts";
+import { isSecretKey, PreviewManager, previewHost, servicesOf } from "./preview.ts";
 import { applyFix, detect, diagnose, rulesDiagnosis, type Ask } from "./preview-ai.ts";
 import { TerminalManager } from "./terminal.ts";
-import { localFilesStatus, rewriteEnv, scanLocalFiles, syncLocalFiles } from "./local-files.ts";
+import { localFilesStatus, parseEnv, rewriteEnv, scanLocalFiles, syncLocalFiles } from "./local-files.ts";
 
 export type CheckRecord = { id: string; name: string; ok: boolean; output: string; at: string; sha: string | null; preExisting: boolean };
 
@@ -52,6 +53,13 @@ const portFree = (port: number) =>
     server.once("error", () => resolve(false));
     server.listen(port, "127.0.0.1", () => server.close(() => resolve(true)));
   });
+
+/** The files Vite, Next.js and Bun load in development, in the order they override each other. */
+const DOTENV_FILES = [".env", ".env.development", ".env.local", ".env.development.local"];
+
+/** Values that exist only while apps run, so they differ from the start env without a restart helping. */
+const RUNTIME_KEYS = /^PREVIEW_(PORT|URL_.+)$/;
+const ENV_KEY = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 export class WorkspaceService {
   readonly previews: PreviewManager;
@@ -148,6 +156,73 @@ export class WorkspaceService {
     const def = service ? defs.find((d) => d.name === service) : (defs.find((d) => d.primary) ?? defs[0]);
     if (!def) throw new WorkspaceError(`This project has no preview service named ${service}`, 404);
     return { project, config: project.preview, def };
+  }
+
+  /** The env a preview service runs with, what it gets on its next start, and the `.env` files its framework reads. */
+  serviceEnv(projectId: string, taskId: string, service?: string, reveal = false): ServiceEnvResponse {
+    const { project, def } = this.serviceDef(projectId, service);
+    const config = this.withLocalEnv(project);
+    const own = (project.preview?.services?.length ? project.preview.services.find((x) => x.name === def.name)?.env : project.preview?.env) ?? {};
+    const rewritten = rewriteEnv(project.localFiles, project.preview?.services?.length ? def : null);
+    const tag = (list: EnvEntry[]) => list.map((e) => (e.key in rewritten && !(e.key in own) && (e.source === "service" || e.source === "preview") ? { ...e, source: "rewrite" as const } : e));
+    const running = this.previews.runningEnv(projectId, taskId, def.name);
+    const next = tag(this.previews.plannedEnv(projectId, taskId, config, this.env(projectId, taskId), def.name));
+    const current = running ? tag(running) : null;
+    const before = new Map((current ?? []).map((e) => [e.key, e.value]));
+    const after = new Map(next.map((e) => [e.key, e.value]));
+    const changed = current ? [...new Set([...before.keys(), ...after.keys()])].filter((k) => k !== (def.portEnv ?? "PORT") && !RUNTIME_KEYS.test(k) && before.get(k) !== after.get(k)).sort() : [];
+    const root = def.shared ? project.repo.path : this.ops(projectId, taskId).root;
+    const dir = path.join(root, def.cwd ?? "");
+    const passed = new Map((current ?? next).map((e) => [e.key, e.source]));
+    const files = DOTENV_FILES.flatMap((name) => {
+      const file = path.join(dir, name);
+      if (!existsSync(file)) return [];
+      const rel = path.relative(root, file);
+      return parseEnv(readFileSync(file, "utf8")).map((v) => ({ file: rel, key: v.key, value: v.value, secret: isSecretKey(v.key), overriddenBy: passed.get(v.key) ?? null }));
+    });
+    const hide = <T extends { value: string; secret: boolean }>(e: T): T => (reveal ? e : { ...e, value: e.secret ? "••••••••" : e.value.replace(/\/\/([^:/@\s]+):([^@\s]+)@/, "//$1:••••••••@") });
+    const info = this.previews.info(projectId, taskId, project.preview).services.find((x) => x.name === def.name);
+    const defs = servicesOf(project.preview!);
+    const templates = defs
+      .filter((x) => x.name !== def.name && (def.shared ? x.shared : true))
+      .flatMap((x) => (x.shared ? ["host", "port", "url"] : ["publicUrl", "url", "port", "lanUrl"]).map((k) => `{{${x.name}.${k}}}`));
+    return {
+      own: Object.fromEntries(Object.entries(own).map(([k, v]) => [k, hide({ value: v, secret: isSecretKey(k) }).value])),
+      locked: [def.portEnv ?? "PORT", "HOST", "BROWSER"],
+      templates,
+      service: def.name,
+      status: info?.status ?? "stopped",
+      startedAt: info?.startedAt ?? null,
+      running: current?.map(hide) ?? null,
+      next: next.map(hide),
+      files: files.map(hide),
+      changed,
+      revealed: reveal,
+    };
+  }
+
+  /** Sets or removes variables in the app's own env in the project settings. Running apps keep their env until restarted. */
+  async setServiceEnv(projectId: string, taskId: string, service: string | undefined, update: ServiceEnvUpdate): Promise<ServiceEnvResponse> {
+    const { config, def } = this.serviceDef(projectId, service);
+    const set = Object.entries(update?.set ?? {});
+    const remove = update?.remove ?? [];
+    if (!set.length && !remove.length) throw new WorkspaceError("There is nothing to change", 400);
+    const locked = new Set([def.portEnv ?? "PORT", "HOST", "BROWSER"]);
+    for (const [key, value] of set) {
+      if (!ENV_KEY.test(key)) throw new WorkspaceError(`${key || "(empty)"} is not a valid variable name: use letters, digits and _, not starting with a digit`, 400);
+      if (locked.has(key)) throw new WorkspaceError(`Nightshift sets ${key} itself when it starts the app, so a value here would be ignored`, 400);
+      if (typeof value === "string" && value.includes("••••••••")) throw new WorkspaceError(`The value of ${key} is still masked: choose Show secrets and enter the real value`, 400);
+      if (typeof value !== "string" || value.length > 4000 || /[\r\n\0]/.test(value)) throw new WorkspaceError(`The value of ${key} must be one line of at most 4000 characters`, 400);
+    }
+    const next: PreviewConfig = structuredClone(config);
+    const target = next.services?.length ? next.services.find((x) => x.name === def.name)! : next;
+    const env = { ...target.env };
+    for (const key of remove) delete env[key];
+    for (const [key, value] of set) env[key] = value;
+    if (Object.keys(env).length) target.env = env;
+    else delete target.env;
+    await this.deps.savePreview(projectId, next);
+    return this.serviceEnv(projectId, taskId, def.name);
   }
 
   private withLocalEnv(project: Project): PreviewConfig {

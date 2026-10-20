@@ -190,6 +190,8 @@ export function startHttp(options: {
     if (rest === "/preview/fix" && m === "POST") return send(res, 200, await ws.fixPreview(projectId, taskId, ((await body()).fix ?? {}) as never, service));
     if (rest === "/preview/detect" && m === "POST") return send(res, 200, await ws.detectPreview(projectId, taskId));
     if (rest === "/preview/logs" && m === "GET") return send(res, 200, { log: ws.previews.logs(projectId, taskId, service) });
+    if (rest === "/preview/env" && m === "PUT") return send(res, 200, await ws.setServiceEnv(projectId, taskId, service, (await body()) as never));
+    if (rest === "/preview/env" && m === "GET") return send(res, 200, ws.serviceEnv(projectId, taskId, service, url.searchParams.get("reveal") === "1"));
     if (rest === "/database/create" && m === "POST") return send(res, 200, await ws.createDatabase(projectId, taskId));
     if (rest === "/database/reset" && m === "POST") return send(res, 200, await ws.createDatabase(projectId, taskId, true));
     if (rest === "/database/drop" && m === "POST") return send(res, 200, await ws.dropDatabase(projectId, taskId));
