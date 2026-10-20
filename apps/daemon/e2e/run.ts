@@ -1708,6 +1708,118 @@ try {
     return `file found (used by server.cjs); with API_URL={{api.url}} written into .public.env.local web called ${apiUrl}, git status clean (skip-worktree); base merge changing the file went through and kept the value; removing the override restored the committed file`;
   });
 
+  await check("Umbra's subscription review runs through the Umbra server: it waits its turn, maps verified and undecided findings, and reports a failed run", async () => {
+    const { createServer } = await import("node:http");
+    const posts: Array<Record<string, unknown>> = [];
+    const clients = new Set<import("node:http").ServerResponse>();
+    let mode: "ok" | "fail" = "ok";
+    let ready = false;
+    let runs = 0;
+    const emit = (ev: Record<string, unknown>) => {
+      for (const c of clients) c.write(`data: ${JSON.stringify(ev)}\n\n`);
+    };
+    const fake = createServer(async (req, res) => {
+      const u = new URL(req.url ?? "/", "http://x");
+      const json = (status: number, body: unknown) => {
+        res.writeHead(status, { "content-type": "application/json" });
+        res.end(JSON.stringify(body));
+      };
+      if (u.pathname === "/api/health") return json(200, { ok: true });
+      if (u.pathname === "/api/stream") {
+        res.writeHead(200, { "content-type": "text/event-stream" });
+        res.write(": umbra stream open\n\n");
+        clients.add(res);
+        req.on("close", () => clients.delete(res));
+        return;
+      }
+      if (u.pathname === "/api/pathb-run" && req.method === "POST") {
+        let raw = "";
+        for await (const c of req) raw += c;
+        posts.push(JSON.parse(raw));
+        if (posts.length === 1) return json(409, { error: "a path-B run is already active (rev_pb_other) - one at a time; wait for it to finish" });
+        const runId = `rev_pb_${++runs}`;
+        ready = false;
+        setTimeout(() => emit({ kind: "phase", runId, phase: "crawling" }), 200);
+        setTimeout(() => {
+          if (mode === "fail") emit({ kind: "run.failed", runId, error: "sandbox exploded", detail: { cause: "Docker is not running" } });
+          else {
+            emit({ kind: "run.done", runId });
+            setTimeout(() => (ready = true), 400);
+          }
+        }, 600);
+        return json(200, { runId, mode: "subscription", funnel: "path-b-review", profile: "lite" });
+      }
+      if (u.pathname.startsWith("/api/history/")) {
+        if (!ready) return json(404, { error: "no such store" });
+        const f = (claim: string, severity: string, verdict: string, line: number | null) => ({ id: claim, runId: "x", lens: "correctness", category: "logic", claim, file: "README.md", line, severity, failureScenario: `${claim} breaks`, confidence: 0.9, verdict });
+        return json(200, {
+          storeId: decodeURIComponent(u.pathname.split("/").pop()!),
+          runs: [],
+          findings: [f("Count overflows past 255", "major", "verified", 2), f("Typo in heading", "nit", "verified", 1), f("Should the limit be configurable", "major", "insufficient", null), f("Imagined race", "minor", "rejected", 3)],
+        });
+      }
+      if (u.pathname === "/api/cancel") return json(200, { ok: true });
+      json(404, { error: "not found" });
+    });
+    await new Promise<void>((r) => fake.listen(0, "127.0.0.1", () => r()));
+    const umbraUrl = `http://127.0.0.1:${(fake.address() as { port: number }).port}`;
+    try {
+      const tester = {
+        id: "umbra-sub",
+        name: "Umbra (subscription)",
+        command: `"$NIGHTSHIFT_NODE" "$NIGHTSHIFT_TESTERS/umbra-server.mjs" --url ${umbraUrl} --profile lite --retry-seconds 1 --poll-seconds 1`,
+        format: "nightshift-json",
+        when: "manual",
+        blocking: true,
+        enabled: true,
+      };
+      const patched = await (await fetch(`${base}/api/projects/pinned`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ testers: [tester] }) })).json();
+      if (!(patched as { project?: unknown }).project) throw new Error(JSON.stringify(patched));
+      const r = (await get<{ run: Run }>("/api/projects/pinned/tasks/T-1")).run;
+      await post("/api/projects/pinned/tasks/T-1/testers/umbra-sub/run");
+      const v = await waitFor("umbra results", async () => {
+        const x = await get<VerificationResponse>("/api/projects/pinned/tasks/T-1/verification");
+        return x.issues.some((i) => i.sourceName === "Umbra (subscription)") && x.decisions.some((d) => d.status === "open") ? x : null;
+      }, 30_000);
+      const mine = v.issues.filter((i) => i.sourceName === "Umbra (subscription)");
+      const overflow = mine.find((i) => i.title.includes("overflows"));
+      const nit = mine.find((i) => i.title.includes("Typo"));
+      const undecided = mine.find((i) => i.title.includes("configurable"));
+      const step = v.steps.filter((x) => x.testerId === "umbra-sub").at(-1);
+      const body = posts[1]!;
+      const mergeBase = sh(r.worktree, "merge-base", "origin/main", "HEAD").trim();
+      const headSha = sh(r.worktree, "rev-parse", "HEAD").trim();
+      if (
+        posts.length !== 2 ||
+        body.funnel !== "review" ||
+        body.base !== mergeBase ||
+        body.head !== headSha ||
+        body.targetRepo !== r.worktree ||
+        body.profile !== "lite" ||
+        overflow?.severity !== "major" ||
+        overflow.file !== "README.md" ||
+        nit?.severity !== "info" ||
+        undecided?.status !== "needs_decision" ||
+        mine.some((i) => i.title.includes("Imagined")) ||
+        !step?.detail?.includes("verdict: BLOCKED")
+      )
+        throw new Error(JSON.stringify({ posts, mine, step }));
+      for (const d of v.decisions.filter((x) => x.status === "open")) await post(`/api/projects/pinned/tasks/T-1/decisions/${d.id}`, { answer: "Ignore it" });
+      mode = "fail";
+      await post("/api/projects/pinned/tasks/T-1/testers/umbra-sub/run");
+      const failed = await waitFor("umbra failure", async () => {
+        const x = await get<VerificationResponse>("/api/projects/pinned/tasks/T-1/verification");
+        const last = x.steps.filter((st) => st.testerId === "umbra-sub").at(-1);
+        return last && last.id !== step!.id && last.status !== "running" ? last : null;
+      }, 30_000);
+      if (failed.status !== "failed" || !failed.detail?.includes("Could not run") || !failed.detail.includes("sandbox exploded")) throw new Error(JSON.stringify(failed));
+      return `waited out "already active", sent merge-base ${mergeBase.slice(0, 8)}..${headSha.slice(0, 8)} of the worktree; ${step!.detail}; verified major → blocking issue, nit → info, undecided → decision, refuted left out; a failed Umbra run shows as "${failed.detail.slice(0, 90)}…"`;
+    } finally {
+      for (const c of clients) c.end();
+      fake.close();
+    }
+  });
+
   await check("An app that hard-codes port 3000 runs in its own container, so two tasks can preview it at the same time", async () => {
     const hard = makeRepos("hard-");
     const seed = path.join(root, "hard-seed2");

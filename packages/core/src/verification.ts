@@ -74,7 +74,7 @@ export const TESTER_PRESETS: TesterPreset[] = [
     presetId: "umbra-lite",
     name: "Umbra review (lite)",
     description:
-      "Umbra's gate on the branch diff: findings verified against the code, blocking vs advisory, and claims it could not decide. Needs the `umbra` command (bun link in the Umbra checkout) and Umbra's own model access.",
+      "Umbra's gate on the branch diff: findings verified against the code, blocking vs advisory, and claims it could not decide. Needs the `umbra` command (bun link in the Umbra checkout) and a metered ANTHROPIC_API_KEY in Umbra (a Claude subscription does not cover the CLI).",
     command: 'umbra review "origin/$NIGHTSHIFT_BASE" HEAD "$NIGHTSHIFT_TASK" "$NIGHTSHIFT_WORKTREE" --lite',
     format: "umbra",
     when: "before-pr",
@@ -90,6 +90,17 @@ export const TESTER_PRESETS: TesterPreset[] = [
     when: "manual",
     blocking: true,
     timeoutMs: 60 * 60_000,
+  },
+  {
+    presetId: "umbra-subscription",
+    name: "Umbra review (subscription)",
+    description:
+      "Umbra's review on your Claude subscription, run by the Umbra server (path B): start it with `bun run serve` in the Umbra folder, with Docker running and the sandbox image built. One review at a time; a full review takes 20-60 minutes. Use --profile lite for a quicker pass.",
+    command: '"$NIGHTSHIFT_NODE" "$NIGHTSHIFT_TESTERS/umbra-server.mjs" --profile full',
+    format: "nightshift-json",
+    when: "before-pr",
+    blocking: true,
+    timeoutMs: 75 * 60_000,
   },
   {
     presetId: "json",

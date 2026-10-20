@@ -1,6 +1,7 @@
 import { EventEmitter } from "node:events";
 import { existsSync, readFileSync, rmSync } from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   addUsage,
   budgetTokens,
@@ -74,6 +75,7 @@ const MAX_REVIEW_ROUNDS = 2;
 
 const VERSION = "0.2.0";
 const WORKING = new Set(["working", "fixing"]);
+const TESTERS_DIR = fileURLToPath(new URL("../testers/", import.meta.url)).replace(/\/$/, "");
 const REJECT_PUSH = /^((don'?t|do not) push( yet)?|not yet)[.!]?$/i;
 const TASK_CACHE_MS = 3000;
 
@@ -1758,6 +1760,10 @@ export class Orchestrator {
       NIGHTSHIFT_BRANCH: run.branch,
       NIGHTSHIFT_TASK: `${task.title}\n\n${task.body}`.trim(),
       NIGHTSHIFT_TASK_ID: run.taskId,
+      NIGHTSHIFT_REMOTE: this.runCtx(run).project.repo.remote,
+      // Testers shipped with Nightshift (e.g. umbra-server.mjs) and the node running Nightshift, for commands that use them.
+      NIGHTSHIFT_TESTERS: TESTERS_DIR,
+      NIGHTSHIFT_NODE: process.execPath,
     };
   }
 
