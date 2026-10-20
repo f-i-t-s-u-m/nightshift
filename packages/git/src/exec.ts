@@ -65,8 +65,9 @@ export function run(
    * is also watched as a process tree, because tools like turbo start each task in a new process group: whatever it
    * leaves running when it exits is killed, and it is stopped if more than MAX_PROCESSES run at once (a script that
    * calls itself, like `"lint": "turbo lint"` inside a turbo package, otherwise spawns until memory runs out).
+   * `onStderr` hears stderr as it arrives (it is still collected in the result).
    */
-  options: { cwd?: string; env?: NodeJS.ProcessEnv; timeoutMs?: number; input?: string; signal?: AbortSignal; group?: boolean } = {},
+  options: { cwd?: string; env?: NodeJS.ProcessEnv; timeoutMs?: number; input?: string; signal?: AbortSignal; group?: boolean; onStderr?: (chunk: string) => void } = {},
 ): Promise<ExecResult> {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
@@ -120,7 +121,10 @@ export function run(
       }
     });
     child.stdout.on("data", (d) => (stdout += d));
-    child.stderr.on("data", (d) => (stderr += d));
+    child.stderr.on("data", (d) => {
+      stderr += d;
+      options.onStderr?.(String(d));
+    });
     child.on("error", reject);
     child.on("close", (code) => {
       if (timer) clearTimeout(timer);

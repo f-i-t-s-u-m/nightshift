@@ -52,6 +52,8 @@ export type VerificationStep = {
   testerId?: string;
   /** What a running step is waiting for, e.g. another task's run of the same queued tester. */
   note?: string;
+  /** The last lines a running step printed (a tester's stderr), so a long run shows what it is doing. Cleared when it finishes. */
+  progress?: string;
   issueIds: string[];
 };
 

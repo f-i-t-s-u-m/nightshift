@@ -1851,9 +1851,26 @@ export class Orchestrator {
         );
         this.vlog.noteStep(run.id, step, null);
       }
-      res = controller.signal.aborted
-        ? { code: -1, stdout: "", stderr: "" }
-        : await exec("sh", ["-c", tester.command], { cwd: run.worktree, timeoutMs: tester.timeoutMs ?? 30 * 60_000, env: this.testerEnv(run, task), signal: controller.signal, group: true });
+      // Show what a long tester is doing: its stderr tail on the step, saved at most once a second.
+      let tail = "";
+      let flushed = 0;
+      let pending: NodeJS.Timeout | undefined;
+      const flush = () => {
+        pending = undefined;
+        flushed = Date.now();
+        this.vlog.progressStep(run.id, step, tail.split("\n").slice(-40).join("\n").trim());
+      };
+      const onStderr = (chunk: string) => {
+        tail = (tail + chunk).slice(-8000);
+        if (!pending) pending = setTimeout(flush, Math.max(0, 1000 - (Date.now() - flushed)));
+      };
+      try {
+        res = controller.signal.aborted
+          ? { code: -1, stdout: "", stderr: "" }
+          : await exec("sh", ["-c", tester.command], { cwd: run.worktree, timeoutMs: tester.timeoutMs ?? 30 * 60_000, env: this.testerEnv(run, task), signal: controller.signal, group: true, onStderr });
+      } finally {
+        clearTimeout(pending);
+      }
     } finally {
       release?.();
       this.testerRuns.delete(step);

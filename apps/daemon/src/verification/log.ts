@@ -62,6 +62,13 @@ export class VerificationLog {
     });
   }
 
+  progressStep(runId: string, stepId: string, progress: string) {
+    this.mutate(runId, (d) => {
+      const s = d.steps.find((x) => x.id === stepId);
+      if (s?.status === "running") s.progress = progress;
+    });
+  }
+
   finishStep(runId: string, stepId: string, status: StepStatus, extra: { detail?: string; output?: string; issueIds?: string[]; title?: string } = {}) {
     this.mutate(runId, (d) => {
       const s = d.steps.find((x) => x.id === stepId);
@@ -69,6 +76,7 @@ export class VerificationLog {
       s.status = status;
       s.endedAt = new Date().toISOString();
       delete s.note;
+      delete s.progress;
       if (extra.detail !== undefined) s.detail = extra.detail;
       if (extra.output !== undefined) s.output = extra.output.slice(-20_000);
       if (extra.title) s.title = extra.title;

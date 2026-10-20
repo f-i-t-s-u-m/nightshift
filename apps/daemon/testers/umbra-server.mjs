@@ -148,14 +148,31 @@ let seen = 0;
 let doneAt = 0;
 let lastPoll = 0;
 let detail = null;
+// Progress lines Nightshift shows on the step while it runs; a heartbeat each minute so a quiet phase does not look stuck.
+const startedAt = Date.now();
+let phase = "starting";
+let usage = null;
+let lastLine = Date.now();
+const say = (msg) => {
+  lastLine = Date.now();
+  log(msg);
+};
+const clip = (s, n = 160) => (String(s).length > n ? `${String(s).slice(0, n - 1)}…` : String(s));
 while (Date.now() < deadline) {
   const list = mine();
   for (const e of list.slice(seen)) {
-    if (e.kind === "phase") log(`phase: ${e.phase ?? e.name ?? JSON.stringify(e)}`);
-    else if (e.kind === "log" && e.level !== "info") log(`${e.level}: ${e.msg}`);
-    else if (e.kind === "run.done") log("Umbra finished; reading the verdict");
+    if (e.kind === "phase") say(`phase: ${(phase = e.phase ?? e.name ?? JSON.stringify(e))}`);
+    else if (e.kind === "log") say(`${e.level === "info" ? "" : `${e.level}: `}${e.msg}`);
+    else if (e.kind === "payload") say(`finding ${e.payloadId}${e.scopeId ? ` (${e.scopeId})` : ""}: ${clip(e.claim)}`);
+    else if (e.kind === "ward.verdict") say(`${e.payloadRef}: ${e.verdict}`);
+    else if (e.kind === "usage") usage = e;
+    else if (e.kind === "run.done") say("Umbra finished; reading the verdict");
   }
   seen = list.length;
+  if (Date.now() - lastLine >= 60_000) {
+    const mins = Math.round((Date.now() - startedAt) / 60_000);
+    say(`still ${phase} · ${mins} min${usage ? ` · ${usage.calls} model calls, ${Math.round(usage.outputTokens / 1000)}k output tokens` : ""}`);
+  }
   const failed = list.find((e) => e.kind === "run.failed");
   if (failed) {
     stream.abort();

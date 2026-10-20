@@ -389,6 +389,21 @@ function StopTesterButton({ busy, name, onClick }: { busy: boolean; name: string
 
 type StepStop = { stopping: string | null; stop: (testerId: string, name: string) => Promise<void> };
 
+function StepProgress({ text }: { text: string }) {
+  const lines = text.split("\n");
+  return (
+    <Collapsible className="group/live mt-1">
+      <CollapsibleTrigger className="inline-flex max-w-full items-center gap-1 rounded-sm text-left text-xs text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50">
+        <ChevronRight className="size-3.5 shrink-0 transition-transform group-data-[state=open]/live:rotate-90" />
+        <span className="truncate font-mono">{lines[lines.length - 1]}</span>
+      </CollapsibleTrigger>
+      <CollapsibleContent>
+        <pre className="mt-1.5 max-h-60 overflow-auto rounded-md bg-zinc-950 p-2.5 font-mono text-[11px] leading-4 whitespace-pre-wrap break-all text-zinc-100" aria-live="polite">{text}</pre>
+      </CollapsibleContent>
+    </Collapsible>
+  );
+}
+
 function StepRow({ step, issues, now, onJump, last, stopper }: { step: VerificationStep; issues: Map<string, Issue>; now: number; onJump: (id: string) => void; last: boolean; stopper: StepStop }) {
   const kind = STEP_KINDS[step.kind] ?? { label: step.kind, icon: Bot };
   const status = STEP_STATUS[step.status] ?? STEP_STATUS.skipped;
@@ -415,6 +430,7 @@ function StepRow({ step, issues, now, onJump, last, stopper }: { step: Verificat
           ) : null}
         </div>
         {step.status === "running" && step.note ? <p className="text-xs text-amber-700 dark:text-amber-400">{step.note}</p> : null}
+        {step.status === "running" && step.progress ? <StepProgress text={step.progress} /> : null}
         <div className="flex flex-wrap items-center gap-x-2 text-xs text-muted-foreground">
           <time dateTime={step.startedAt} title={formatDateTime(step.startedAt)}>
             {formatTime(step.startedAt).slice(0, 5)}
