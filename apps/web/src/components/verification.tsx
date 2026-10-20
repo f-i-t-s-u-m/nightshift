@@ -152,9 +152,10 @@ const DECISION_KINDS: Record<Decision["kind"], string> = {
   budget: "Budget reached",
   push: "Approve the push",
   setup: "Workspace setup failed",
+  tester: "A required test could not run",
 };
 
-const PLAIN_CONTEXT = new Set<Decision["kind"]>(["push", "setup"]);
+const PLAIN_CONTEXT = new Set<Decision["kind"]>(["push", "setup", "tester"]);
 
 function DecisionCard({ projectId, taskId, decision, onAnswered }: { projectId: string; taskId: string; decision: Decision; onAnswered: () => void }) {
   const [text, setText] = useState("");
@@ -197,7 +198,7 @@ function DecisionCard({ projectId, taskId, decision, onAnswered }: { projectId: 
           <Collapsible defaultOpen={PLAIN_CONTEXT.has(decision.kind)} className="group/ctx rounded-md border bg-background/60">
             <CollapsibleTrigger className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs font-medium text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50">
               <ChevronRight className="size-3.5 transition-transform group-data-[state=open]/ctx:rotate-90" />
-              {decision.kind === "push" ? "What will be pushed" : decision.kind === "setup" ? "What went wrong" : "Context"}
+              {decision.kind === "push" ? "What will be pushed" : decision.kind === "setup" || decision.kind === "tester" ? "What went wrong" : "Context"}
             </CollapsibleTrigger>
             <CollapsibleContent className="border-t px-3 py-2 text-sm">
               {PLAIN_CONTEXT.has(decision.kind) ? (
@@ -631,6 +632,7 @@ function TesterRow({ projectId, taskId, tester, steps, onRan, stopper }: { proje
         <div className="flex flex-wrap gap-x-2 text-xs text-muted-foreground">
           <span>{tester.enabled ? WHEN_LABELS[tester.when] : "Only when you run it"}</span>
           <span>· {tester.blocking ? "Blocks the PR" : "Advisory"}</span>
+          {tester.onError === "ask" && tester.when !== "manual" ? <span title="If it cannot run, the PR waits and you are asked">· must run</span> : null}
           {tester.queue ? <span title={`Runs one at a time with every other "${tester.queue}" tester, across all tasks`}>· one at a time ({tester.queue})</span> : null}
           {last && lastStatus ? (
             <span className={TONE_TEXT[lastStatus.tone]}>

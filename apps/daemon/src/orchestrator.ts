@@ -447,6 +447,19 @@ export class Orchestrator {
         }),
       };
     }
+    if (decision.kind === "tester") {
+      if (/^stop/i.test(text)) {
+        await this.control(run.id, "stop");
+        return { decision, effect: "The task was stopped." };
+      }
+      const ask = this.store.setting<{ testerId: string; head: string } | null>(`testerAsk:${run.id}`, null);
+      if (/^skip/i.test(text) && ask) {
+        this.store.setSetting(`testerSkip:${run.id}:${ask.testerId}`, ask.head);
+        this.event(run.id, "info", `${decision.source} skipped by you for this change`);
+        return { decision, effect: `${this.resumeAt(run, "reviewing", null)} ${decision.source} is skipped until the code changes.` };
+      }
+      return { decision, effect: this.resumeAt(run, "reviewing", null) };
+    }
     if (decision.kind === "loop-limit") {
       if (/^stop/i.test(text)) {
         await this.control(run.id, "stop");
@@ -470,7 +483,7 @@ export class Orchestrator {
     return { decision, effect: this.resumeAt(run, "fixing", { requestId: `${run.id}:decision:${decision.id}`, author: "answer", text: text2, attachmentIds: [] }) };
   }
 
-  private resumeAt(run: Run, phase: "fixing" | "pushing", pending: Pending | null): string {
+  private resumeAt(run: Run, phase: "fixing" | "pushing" | "reviewing", pending: Pending | null): string {
     if (isActivePhase(run.phase) && run.phase !== "needs_info") {
       if (pending) this.store.setSetting(`sessionIntro:${run.id}`, pending.text);
       return "The agent picks this up after its current step.";
@@ -484,9 +497,9 @@ export class Orchestrator {
     }
     if (pending) this.setPending(run.id, pending);
     void this.setTaskStatus(run.id, "in_progress", `:resume:${Date.now()}`);
-    this.update(run.id, { phase, slot, lastCommentSeenAt: new Date().toISOString(), activity: phase === "pushing" ? "Opening the PR" : "Continuing with your decision" });
+    this.update(run.id, { phase, slot, lastCommentSeenAt: new Date().toISOString(), activity: phase === "pushing" ? "Opening the PR" : phase === "reviewing" ? "Running the tests again" : "Continuing with your decision" });
     void this.drive(run.id);
-    return phase === "pushing" ? "The agent opens the PR now." : "The agent continues now.";
+    return phase === "pushing" ? "The agent opens the PR now." : phase === "reviewing" ? "The tests run again now." : "The agent continues now.";
   }
 
   async runTesterNow(projectId: string, taskId: string, testerId: string): Promise<{ stepId: string | null; effect: string }> {
@@ -1822,7 +1835,7 @@ export class Orchestrator {
     for (const t of this.testerRuns.values()) if (t.runId === runId) t.controller.abort(reason);
   }
 
-  async runTester(run: Run, tester: TesterConfig): Promise<{ blocking: Issue[]; decisions: Decision[]; stopped?: boolean }> {
+  async runTester(run: Run, tester: TesterConfig): Promise<{ blocking: Issue[]; decisions: Decision[]; stopped?: boolean; error?: string }> {
     const ctx = this.runCtx(run);
     const task = await ctx.source.getTask(run.taskId);
     const step = this.vlog.startStep(run.id, "external", tester.name, tester.command, tester.id);
@@ -1856,7 +1869,7 @@ export class Orchestrator {
     if (!parsed.ranOk) {
       this.vlog.finishStep(run.id, step, "failed", { detail: `Could not run: ${parsed.error}`, output });
       this.event(run.id, "error", `${tester.name} could not run: ${parsed.error}`);
-      return { blocking: [], decisions: [] };
+      return { blocking: [], decisions: [], error: parsed.error ?? "it did not run" };
     }
     const outcome = this.recordFindings(run, "external", tester.name, parsed.findings);
     const blocking = tester.blocking ? outcome.blocking : [];
@@ -1943,6 +1956,21 @@ export class Orchestrator {
     ].join("\n");
   }
 
+  /** A required tester could not run: hold the PR and ask the owner. */
+  private async askTesterFailed(run: Run, tester: TesterConfig, error: string, head: string): Promise<boolean> {
+    this.store.setSetting(`testerAsk:${run.id}`, { testerId: tester.id, head });
+    for (const d of this.vlog.openDecisions(run.id)) if (d.kind === "tester") this.vlog.answerDecision(run.id, d.id, "Superseded by a newer run");
+    this.vlog.addDecision(run.id, {
+      kind: "tester",
+      question: `${tester.name} could not run, and this project holds the PR until it has. What now?`,
+      context: error.slice(-3000),
+      options: ["Run it again", "Skip it for this change", "Stop the task"],
+      source: tester.name,
+    });
+    await this.pauseForDecisions(this.store.getRun(run.id)!);
+    return false;
+  }
+
   private async verify(run: Run): Promise<boolean> {
     const ctx = this.runCtx(run);
     const summary = this.store.setting<string | null>(`summary:${run.id}`, null);
@@ -1969,10 +1997,20 @@ export class Orchestrator {
       const fresh = this.store.getRun(run.id);
       return !fresh || fresh.paused || !isActivePhase(fresh.phase);
     };
+    const head = (await exec("git", ["rev-parse", "HEAD"], { cwd: run.worktree })).stdout.trim();
+    // A required tester the owner chose to skip for this commit is not run again until the code changes.
+    const skipped = (t: TesterConfig) => {
+      if (this.store.setting<string | null>(`testerSkip:${run.id}:${t.id}`, null) !== head) return false;
+      const step = this.vlog.startStep(run.id, "external", t.name, t.command, t.id);
+      this.vlog.finishStep(run.id, step, "skipped", { detail: "Skipped by you for this change" });
+      return true;
+    };
     for (const t of testers.filter((x) => x.when === "every-round")) {
+      if (skipped(t)) continue;
       this.update(run.id, { activity: `Running ${t.name}` });
       const r = await this.runTester(run, t);
       if (halted(r)) return false;
+      if (r.error && t.onError === "ask") return this.askTesterFailed(run, t, r.error, head);
       const h = await handle(r.blocking, r.decisions);
       if (h !== null) return h;
     }
@@ -1984,9 +2022,11 @@ export class Orchestrator {
       if (h !== null) return h;
     }
     for (const t of testers.filter((x) => x.when === "before-pr")) {
+      if (skipped(t)) continue;
       this.update(run.id, { activity: `Running ${t.name}` });
       const r = await this.runTester(run, t);
       if (halted(r)) return false;
+      if (r.error && t.onError === "ask") return this.askTesterFailed(run, t, r.error, head);
       const h = await handle(r.blocking, r.decisions);
       if (h !== null) return h;
     }

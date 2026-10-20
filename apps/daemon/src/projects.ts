@@ -151,6 +151,7 @@ export async function applyProjectUpdate(project: Project, update: ProjectUpdate
           enabled: t.enabled !== false,
           ...(t.timeoutMs && t.timeoutMs > 0 ? { timeoutMs: Math.min(t.timeoutMs, 4 * 3600_000) } : {}),
           ...(t.queue?.trim() ? { queue: t.queue.trim().toLowerCase().slice(0, 40) } : {}),
+          ...(t.onError === "ask" ? { onError: "ask" as const } : {}),
         };
       });
   }

@@ -52,6 +52,7 @@ const fromPreset = (p: TesterPreset): TesterConfig => ({
   enabled: true,
   ...(p.timeoutMs ? { timeoutMs: p.timeoutMs } : {}),
   ...(p.queue ? { queue: p.queue } : {}),
+  ...(p.onError ? { onError: p.onError } : {}),
 });
 
 function TesterEditor({ tester, prefix, onChange, onRemove }: { tester: TesterConfig; prefix: string; onChange: (patch: Partial<TesterConfig>) => void; onRemove: () => void }) {
@@ -144,6 +145,19 @@ function TesterEditor({ tester, prefix, onChange, onRemove }: { tester: TesterCo
         </div>
         <Switch id={id("blocking")} checked={tester.blocking} onCheckedChange={(v) => onChange({ blocking: v })} />
       </div>
+      {tester.when !== "manual" ? (
+        <div className="flex items-start justify-between gap-4 rounded-md bg-muted/40 px-3 py-2">
+          <div className="grid gap-0.5">
+            <Label htmlFor={id("required")}>Must run before the PR</Label>
+            <p className="text-xs text-muted-foreground">
+              {tester.onError === "ask"
+                ? "If it cannot run (command missing, server down, timeout), the task waits and asks you: run it again, skip it for this change, or stop."
+                : "If it cannot run, the task goes on to the PR without it."}
+            </p>
+          </div>
+          <Switch id={id("required")} checked={tester.onError === "ask"} onCheckedChange={(v) => onChange({ onError: v ? "ask" : undefined })} />
+        </div>
+      ) : null}
     </li>
   );
 }

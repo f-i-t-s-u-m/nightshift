@@ -20,7 +20,7 @@ export type Issue = {
   decisionId?: string;
 };
 
-export type DecisionKind = "agent-question" | "finding" | "loop-limit" | "plan" | "deletion" | "budget" | "push" | "setup";
+export type DecisionKind = "agent-question" | "finding" | "loop-limit" | "plan" | "deletion" | "budget" | "push" | "setup" | "tester";
 
 export type Decision = {
   id: string;
@@ -69,6 +69,11 @@ export type TesterConfig = {
   timeoutMs?: number;
   /** Testers with the same queue name run one at a time across all tasks and projects (e.g. "umbra": the Umbra server takes one review at a time). Waiting does not count toward the timeout. */
   queue?: string;
+  /**
+   * When it cannot run (command missing, server down, timeout, no result): "ask" holds the PR and asks the owner
+   * (run it again, skip it for this change, stop the task); "skip" (default) goes on without it.
+   */
+  onError?: "ask" | "skip";
 };
 
 export type TesterPreset = Omit<TesterConfig, "id" | "enabled"> & { presetId: string; description: string };
@@ -106,6 +111,7 @@ export const TESTER_PRESETS: TesterPreset[] = [
     blocking: true,
     timeoutMs: 75 * 60_000,
     queue: "umbra",
+    onError: "ask",
   },
   {
     presetId: "json",

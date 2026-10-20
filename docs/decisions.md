@@ -310,3 +310,12 @@ A running tester could not be stopped (an Umbra review kept spending the subscri
 - **Pause and Stop on a task stop its running testers** ("Stopped: the task was paused/stopped"), and that pass of the checks ends; after Resume the checks run again from the start.
 - **Queue** (per tester, "One at a time"): testers with the same queue name run one after another across all tasks and projects, first come first served. A waiting tester's step shows who runs now and how many wait ahead; its timeout starts only when its turn comes. The Umbra subscription preset uses the queue `umbra`.
 - Still open: a task whose tester waits or runs keeps its agent slot (the reviewing phase is active), so with 2 slots, two tasks waiting on Umbra hold both. And a blocking tester that could not run (server down, timeout) does not block the PR.
+
+## D35. A tester can be required: it must run before the PR (2026-10-20)
+
+A blocking tester that could not run (command missing, server down, timeout, no result) let the task go on to the PR without it, which silently skipped a gate such as Umbra.
+
+- Per tester, **"Must run before the PR"** (`onError: "ask"`; off = `"skip"`, the old behaviour, still the default): when it cannot run during a task's checks, the task pauses in Needs info with a "A required test could not run" decision showing the error, and no PR is opened. Options: *Run it again* (the tests run again; asks again if it still cannot run), *Skip it for this change* (remembered for the current commit only; a later fix round runs it again), *Stop the task*. Any other answer counts as "run it again".
+- Independent of Blocking: blocking decides whether its findings hold the PR, required decides whether its not running does.
+- Stopping a required tester by hand counts as skipping it this time; pausing or stopping the task ends the pass as before (D34).
+- The Umbra subscription preset is required by default.

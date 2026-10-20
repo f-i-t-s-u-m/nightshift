@@ -2197,6 +2197,43 @@ try {
     return `prefix WEB → next WEB-1 ("1x" refused); WCALL-482 accepted (duplicate in another case and "has space/slash" refused), an empty id became WEB-1; a WonderCall project refuses own ids; WCALL-482 ran on ${run.branch} with commit "${subject}"; clearing the prefix gives ${reset.nextTaskId}`;
   });
 
+  await check("A tester that must run holds the PR when it cannot run: run it again, or skip it for this change", async () => {
+    const gate = makeRepos("gate-");
+    const modeFile = path.join(root, "gate-mode.txt");
+    writeFileSync(modeFile, "down");
+    const script = path.join(root, "gate-tester.cjs");
+    writeFileSync(script, `const m = require('node:fs').readFileSync(${JSON.stringify(modeFile)}, 'utf8').trim(); if (m !== 'ok') { console.log('gate server unreachable'); process.exit(3); } console.log(JSON.stringify({ summary: 'gate ok', findings: [] }));\n`);
+    const created = await post<{ project?: { id: string }; error?: string }>("/api/projects", { name: "Gate", repo: { path: gate.repo, baseBranch: "main" }, gitHost: "local", source: { type: "local" }, checks: [], review: false });
+    if (created.project?.id !== "gate") throw new Error(JSON.stringify(created));
+    await (await fetch(`${base}/api/projects/gate`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ testers: [{ id: "gatekeeper", name: "Gatekeeper", command: `node ${script}`, format: "nightshift-json", when: "before-pr", blocking: true, enabled: true, onError: "ask" }] }) })).json();
+    type View = { run: Run | null };
+    const testerDecision = (t: string) =>
+      waitFor(`gate ${t} decision`, async () => {
+        const v = await get<VerificationResponse>(`/api/projects/gate/tasks/${t}/verification`);
+        return v.decisions.find((d) => d.kind === "tester" && d.status === "open") ?? null;
+      }, 40_000);
+    await post("/api/projects/gate/tasks", { title: "Gate one", body: "Add a note." });
+    const first = await testerDecision("T-1");
+    const held = (await get<View>("/api/projects/gate/tasks/T-1")).run!;
+    if (held.phase !== "needs_info" || held.prNumber || !first.context.includes("unreachable")) throw new Error(JSON.stringify({ phase: held.phase, pr: held.prNumber, first }));
+    await post(`/api/projects/gate/tasks/T-1/decisions/${first.id}`, { answer: "Run it again" });
+    const second = await waitFor("asked again", async () => {
+      const v = await get<VerificationResponse>("/api/projects/gate/tasks/T-1/verification");
+      return v.decisions.find((d) => d.kind === "tester" && d.status === "open" && d.id !== first.id) ?? null;
+    }, 30_000);
+    writeFileSync(modeFile, "ok");
+    await post(`/api/projects/gate/tasks/T-1/decisions/${second.id}`, { answer: "Run it again" });
+    const pr1 = await waitFor("gate T-1 PR", async () => (await get<View>("/api/projects/gate/tasks/T-1")).run?.prNumber ?? null, 30_000);
+    writeFileSync(modeFile, "down");
+    await post("/api/projects/gate/tasks", { title: "Gate two", body: "Add a note." });
+    const third = await testerDecision("T-2");
+    await post(`/api/projects/gate/tasks/T-2/decisions/${third.id}`, { answer: "Skip it for this change" });
+    const pr2 = await waitFor("gate T-2 PR", async () => (await get<View>("/api/projects/gate/tasks/T-2")).run?.prNumber ?? null, 30_000);
+    const steps = (await get<VerificationResponse>("/api/projects/gate/tasks/T-2/verification")).steps.filter((x) => x.testerId === "gatekeeper");
+    if (steps.at(-1)?.status !== "skipped" || steps.at(-1)?.detail !== "Skipped by you for this change") throw new Error(JSON.stringify(steps));
+    return `T-1 held without a PR ("${first.question.slice(0, 50)}…"), asked again while still down, PR #${pr1} once it ran; T-2 skipped for this change → PR #${pr2}, step "Skipped by you for this change"`;
+  });
+
   await check("Kill switch turns on and off", async () => {
     const on = await post<{ killSwitch: boolean }>("/api/kill-switch", { on: true });
     const status = await get<StatusResponse>("/api/status");
