@@ -33,6 +33,8 @@ import {
   type Project,
   isTaskType,
   taskTypeInfo,
+  TASK_ID_PATTERN,
+  taskPrefixOf,
   type GithubRepoInput,
   type MoveToGithubResult,
 } from "@nightshift/core";
@@ -2285,6 +2287,14 @@ export class Orchestrator {
       const branches = await this.branches(projectId);
       if (!branches.branches.some((b) => b.name === base)) throw new Error(`Branch ${base} was not found on ${ctx.project.repo.remote}`);
     }
+    const customId = input.id?.trim() || undefined;
+    if (customId) {
+      if (ctx.project.source.type !== "local") throw new Error("Tasks of this project come from WonderCall, which gives them their ids");
+      if (!TASK_ID_PATTERN.test(customId)) throw new Error(`The task id ${customId} is not valid: use letters, digits, ".", "_" or "-" (up to 40), starting with a letter or digit`);
+      // Runs keep a task's id after the task is gone, and branch names are lower-cased: both must stay unambiguous.
+      if (this.store.localTaskIdTaken(projectId, customId) || this.store.runsForProject(projectId).some((r) => r.taskId.toLowerCase() === customId.toLowerCase()))
+        throw Object.assign(new Error(`This project already has a task ${customId}`), { status: 409 });
+    }
     const startFrom = input.type === "review" ? input.startFrom?.trim() : undefined;
     if (input.type === "review") {
       if (!startFrom) throw new Error("Choose the branch with the work to continue");
@@ -2292,7 +2302,7 @@ export class Orchestrator {
       if (!(await this.branches(projectId, startFrom)).branches.some((b) => b.name === startFrom)) throw new Error(`Branch ${startFrom} was not found on ${ctx.project.repo.remote}`);
       if (this.activeTaskForBranch(projectId, startFrom)) throw new Error(`Another task is still working on ${startFrom}; stop it or wait until it is done`);
     }
-    const task = await ctx.source.createTask({ title, body: input.body?.trim() ?? "" });
+    const task = await ctx.source.createTask({ title, body: input.body?.trim() ?? "", ...(customId ? { id: customId } : {}) });
     if (base && base !== ctx.project.repo.baseBranch) this.store.setSetting(`taskBase:${projectId}/${task.id}`, base);
     // Agents push only to branches under the project's prefix (D6): another prefix gets its own agent branch, started from it.
     if (startFrom && !meta) {
@@ -2377,7 +2387,8 @@ export class Orchestrator {
     const tasks = await this.listTasksCached(ctx);
     const items = tasks.map((t) => this.taskItem(projectId, t));
     items.sort((a, b) => (b.updatedAt ?? b.createdAt ?? "").localeCompare(a.updatedAt ?? a.createdAt ?? ""));
-    return { project: await this.projectSummary(ctx), tasks: items };
+    const nextTaskId = ctx.project.source.type === "local" ? this.store.nextLocalTaskId(projectId, taskPrefixOf(ctx.project)) : null;
+    return { project: await this.projectSummary(ctx), tasks: items, nextTaskId };
   }
 
   async taskView(projectId: string, taskId: string, sessionId?: string): Promise<TaskViewResponse> {

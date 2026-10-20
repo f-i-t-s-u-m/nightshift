@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useId, useState, type FormEvent } from "react";
 import { ChevronDown, CircleAlert, ExternalLink, GitBranch, GitPullRequest, Inbox, ListFilter, Plus, Radar, Settings, Share2 } from "lucide-react";
 import { toast } from "sonner";
-import { TASK_TYPES, isTaskType, taskTypeInfo, type PreviewStatus, type ProjectTasksResponse, type TaskListItem, type TaskPreviewSummary, type TaskStatus, type TaskType } from "@nightshift/core";
+import { TASK_ID_PATTERN, TASK_TYPES, isTaskType, taskTypeInfo, type PreviewStatus, type ProjectTasksResponse, type TaskListItem, type TaskPreviewSummary, type TaskStatus, type TaskType } from "@nightshift/core";
 import { formatDateTime, type Tone } from "@nightshift/ui";
 import { Cost } from "../billing";
 import { Button } from "@/components/ui/button";
@@ -238,12 +238,15 @@ function TaskRow({ projectId, task, defaultBranch, shared }: { projectId: string
 function NewTaskDialog({
   projectId,
   projectDefaultBranch,
+  nextTaskId,
   open,
   onOpenChange,
   onCreated,
 }: {
   projectId: string;
   projectDefaultBranch: string;
+  /** null when the task source gives ids (WonderCall): no id field then. */
+  nextTaskId: string | null;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onCreated: (type: TaskType) => void;
@@ -253,16 +256,18 @@ function NewTaskDialog({
   const [baseBranch, setBaseBranch] = useState<string | null>(null);
   const [startFrom, setStartFrom] = useState<string | null>(null);
   const [title, setTitle] = useState("");
+  const [taskId, setTaskId] = useState("");
   const [body, setBody] = useState("");
   const [type, setType] = useState<TaskType>(DEFAULT_TASK_TYPE);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const id = useId();
   const review = type === "review";
+  const idError = taskId.trim() && !TASK_ID_PATTERN.test(taskId.trim()) ? 'Use letters, digits, ".", "_" or "-", starting with a letter or digit' : null;
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
-    if (!title.trim() || busy || uploads.uploading || (review && !startFrom)) return;
+    if (!title.trim() || busy || uploads.uploading || (review && !startFrom) || idError) return;
     setBusy(true);
     setError(null);
     try {
@@ -274,11 +279,13 @@ function NewTaskDialog({
         attachmentIds: uploads.attachments.map((a) => a.id),
         ...(base ? { baseBranch: base } : {}),
         ...(review && startFrom ? { startFrom } : {}),
+        ...(taskId.trim() ? { id: taskId.trim() } : {}),
       });
       uploads.clear();
       setBaseBranch(null);
       setStartFrom(null);
       setTitle("");
+      setTaskId("");
       setBody("");
       setType(DEFAULT_TASK_TYPE);
       onCreated(type);
@@ -326,9 +333,37 @@ function NewTaskDialog({
               </p>
             </div>
           ) : null}
-          <div className="grid gap-2">
-            <Label htmlFor={`${id}-title`}>Title</Label>
-            <Input id={`${id}-title`} value={title} onChange={(e) => setTitle(e.target.value)} placeholder="What should the agent do?" required onPaste={uploads.onPaste} />
+          <div className={cn("grid gap-x-3 gap-y-2", nextTaskId !== null && "sm:grid-cols-[9rem_1fr]")}>
+            {nextTaskId !== null ? (
+              <div className="grid content-start gap-2">
+                <Label htmlFor={`${id}-taskid`}>ID</Label>
+                <Input
+                  id={`${id}-taskid`}
+                  value={taskId}
+                  onChange={(e) => setTaskId(e.target.value.replace(/\s/g, ""))}
+                  placeholder={nextTaskId}
+                  className="font-mono"
+                  aria-invalid={Boolean(idError)}
+                  aria-describedby={`${id}-taskid-hint`}
+                  autoComplete="off"
+                  spellCheck={false}
+                  maxLength={40}
+                />
+              </div>
+            ) : null}
+            <div className="grid content-start gap-2">
+              <Label htmlFor={`${id}-title`}>Title</Label>
+              <Input id={`${id}-title`} value={title} onChange={(e) => setTitle(e.target.value)} placeholder="What should the agent do?" required onPaste={uploads.onPaste} />
+            </div>
+            {nextTaskId !== null ? (
+              <p id={`${id}-taskid-hint`} className={cn("text-xs sm:col-span-2", idError ? "text-destructive" : "text-muted-foreground")}>
+                {idError ?? (
+                  <>
+                    Your own id, such as a board ticket number. Leave it empty for <code className="font-mono">{nextTaskId}</code>. It names the branch, the commits and the pull request.
+                  </>
+                )}
+              </p>
+            ) : null}
           </div>
           <div className="grid gap-2">
             <Label htmlFor={`${id}-body`}>Description</Label>
@@ -355,7 +390,7 @@ function NewTaskDialog({
               <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
                 Cancel
               </Button>
-              <Button type="submit" disabled={!title.trim() || busy || uploads.uploading || (review && !startFrom)}>
+              <Button type="submit" disabled={!title.trim() || busy || uploads.uploading || (review && !startFrom) || Boolean(idError)}>
                 {busy ? "Creating…" : uploads.uploading ? "Uploading…" : "Create task"}
               </Button>
             </div>
@@ -519,6 +554,7 @@ export function ProjectPage({ projectId }: { projectId: string }) {
       <NewTaskDialog
         projectId={projectId}
         projectDefaultBranch={project.repo.baseBranch}
+        nextTaskId={data?.nextTaskId ?? null}
         open={composing}
         onOpenChange={setComposing}
         onCreated={(created) => {

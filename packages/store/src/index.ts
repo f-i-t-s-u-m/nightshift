@@ -311,9 +311,22 @@ export class Store {
     return row ? rowToLocalTask(row) : null;
   }
 
-  createLocalTask(projectId: string, title: string, body: string): LocalTask {
-    const row = this.db.prepare("SELECT COUNT(*) AS n FROM local_tasks WHERE project_id = ?").get(projectId) as Row;
-    const id = `T-${Number(row.n) + 1}`;
+  /** True when the project already has a task with this id, ignoring case (branch names are lower-cased). */
+  localTaskIdTaken(projectId: string, id: string): boolean {
+    return Boolean(this.db.prepare("SELECT 1 FROM local_tasks WHERE project_id = ? AND lower(id) = lower(?)").get(projectId, id));
+  }
+
+  /** `<prefix>-<n>` with n one above the highest number already used with that prefix. */
+  nextLocalTaskId(projectId: string, prefix = "T"): string {
+    const rows = this.db.prepare("SELECT id FROM local_tasks WHERE project_id = ?").all(projectId) as Row[];
+    const re = new RegExp(`^${prefix}-(\\d+)$`, "i");
+    const top = rows.reduce((max, r) => Math.max(max, Number(String(r.id).match(re)?.[1] ?? 0)), 0);
+    return `${prefix}-${top + 1}`;
+  }
+
+  createLocalTask(projectId: string, title: string, body: string, opts: { id?: string; prefix?: string } = {}): LocalTask {
+    const id = opts.id ?? this.nextLocalTaskId(projectId, opts.prefix);
+    if (this.localTaskIdTaken(projectId, id)) throw Object.assign(new Error(`This project already has a task ${id}`), { status: 409 });
     const at = now();
     this.db
       .prepare("INSERT INTO local_tasks (project_id, id, title, body, status, created_at, updated_at) VALUES (?, ?, ?, ?, 'ready_for_ai', ?, ?)")

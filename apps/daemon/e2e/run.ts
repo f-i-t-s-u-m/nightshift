@@ -2128,6 +2128,34 @@ try {
     return `stopped T-1 (waiting on its PR) and T-2 (working), removed 2 workspaces; repo and pushed branch ${run.branch} kept; re-created as ${again.project.id}`;
   });
 
+  await check("Tasks can get the owner's own id, or the project's prefix and the next number; ids name the branch and commits", async () => {
+    type Tasks = { nextTaskId: string | null; tasks: Array<{ id: string }> };
+    const patch = (body: unknown) => fetch(`${base}/api/projects/website`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const createRaw = (body: unknown) => fetch(`${base}/api/projects/website/tasks`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const before = await get<Tasks>("/api/projects/website/tasks");
+    if (!/^T-\d+$/.test(before.nextTaskId ?? "")) throw new Error(`next ${before.nextTaskId}`);
+    if ((await patch({ taskPrefix: "1x" })).status !== 400) throw new Error("bad prefix accepted");
+    const saved = (await (await patch({ taskPrefix: "web" })).json()) as { project?: { taskPrefix?: string } };
+    const next = await get<Tasks>("/api/projects/website/tasks");
+    if (saved.project?.taskPrefix !== "WEB" || next.nextTaskId !== "WEB-1") throw new Error(JSON.stringify({ saved: saved.project?.taskPrefix, next: next.nextTaskId }));
+    const custom = await post<{ task: { id: string } }>("/api/projects/website/tasks", { title: "Ticket from the board", body: "Add a note.", id: "WCALL-482" });
+    const dup = await createRaw({ title: "Same id", body: "x", id: "wcall-482" });
+    const bad = await createRaw({ title: "Bad id", body: "x", id: "has space/slash" });
+    const numbered = await post<{ task: { id: string } }>("/api/projects/website/tasks", { title: "Numbered task", body: "Add a note." });
+    const wc = await fetch(`${base}/api/projects/default/tasks`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ title: "x", body: "x", id: "MINE-1" }) });
+    if (custom.task.id !== "WCALL-482" || dup.status === 200 || bad.status === 200 || numbered.task.id !== "WEB-1" || wc.status !== 400) throw new Error(JSON.stringify({ custom, dup: dup.status, bad: bad.status, numbered, wc: wc.status }));
+    const run = await waitFor("custom id PR", async () => {
+      const x = (await get<{ run: Run | null }>("/api/projects/website/tasks/WCALL-482")).run;
+      return x?.prNumber ? x : null;
+    }, 40_000);
+    const subject = sh(second.origin, "log", "-1", "--format=%s", run.branch).trim();
+    if (!run.branch.startsWith("nightshift/wcall-482-") || !subject.startsWith("WCALL-482: Ticket from the board") || !run.worktree.endsWith("/WCALL-482")) throw new Error(JSON.stringify({ branch: run.branch, subject, worktree: run.worktree }));
+    await patch({ taskPrefix: "" });
+    const reset = await get<Tasks>("/api/projects/website/tasks");
+    if (!/^T-\d+$/.test(reset.nextTaskId ?? "")) throw new Error(`after reset ${reset.nextTaskId}`);
+    return `prefix WEB → next WEB-1 ("1x" refused); WCALL-482 accepted (duplicate in another case and "has space/slash" refused), an empty id became WEB-1; a WonderCall project refuses own ids; WCALL-482 ran on ${run.branch} with commit "${subject}"; clearing the prefix gives ${reset.nextTaskId}`;
+  });
+
   await check("Kill switch turns on and off", async () => {
     const on = await post<{ killSwitch: boolean }>("/api/kill-switch", { on: true });
     const status = await get<StatusResponse>("/api/status");

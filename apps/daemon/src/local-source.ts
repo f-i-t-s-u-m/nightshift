@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { Lease, TaskComment, TaskDetail, TaskRef, TaskSource, TaskStatus, TaskSummary } from "@nightshift/core";
+import { taskPrefixOf, type Lease, type TaskComment, type TaskDetail, type TaskRef, type TaskSource, type TaskStatus, type TaskSummary } from "@nightshift/core";
 import type { Store } from "@nightshift/store";
 
 const LEASE_MS = 5 * 60_000;
@@ -24,8 +24,10 @@ export class LocalTaskSource implements TaskSource {
     return this.store.localTasks(this.projectId).map((t) => ({ id: t.id, title: t.title, status: t.status, createdAt: t.createdAt, updatedAt: t.updatedAt }));
   }
 
-  async createTask(input: { title: string; body: string }): Promise<TaskDetail> {
-    const t = this.store.createLocalTask(this.projectId, input.title, input.body);
+  async createTask(input: { title: string; body: string; id?: string }): Promise<TaskDetail> {
+    // Read the prefix from the store each time: a settings change keeps this source object.
+    const prefix = taskPrefixOf(this.store.getProject(this.projectId) ?? {});
+    const t = this.store.createLocalTask(this.projectId, input.title, input.body, { id: input.id, prefix });
     return this.getTask(t.id);
   }
 

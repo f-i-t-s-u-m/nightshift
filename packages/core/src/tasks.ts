@@ -47,7 +47,8 @@ export type TaskSummary = {
 export interface TaskSource {
   readonly name: string;
   listTasks(): Promise<TaskSummary[]>;
-  createTask(input: { title: string; body: string }): Promise<TaskDetail>;
+  /** `id`: the owner's own id, only for sources that let Nightshift choose ids. */
+  createTask(input: { title: string; body: string; id?: string }): Promise<TaskDetail>;
   connect(): Promise<void>;
   close(): Promise<void>;
   listReady(): Promise<TaskRef[]>;

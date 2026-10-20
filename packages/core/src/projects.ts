@@ -36,6 +36,8 @@ export type Project = {
   skills?: Record<string, boolean>;
   pushMode?: "auto" | "approve";
   localFiles?: import("./workspace.ts").LocalFilesConfig;
+  /** Prefix of the ids Nightshift gives its own tasks (`WC` → WC-1, WC-2, …). Default `T`. */
+  taskPrefix?: string;
   createdAt: string;
 };
 
@@ -54,6 +56,7 @@ export type NewProjectInput = {
   brief?: string;
   model?: import("./models.ts").ModelChoice | null;
   reviewModel?: import("./models.ts").ModelChoice | null;
+  taskPrefix?: string;
 };
 
 export type ProjectSummary = Project & {
@@ -98,7 +101,19 @@ export type TaskListItem = {
   preview: import("./workspace.ts").TaskPreviewSummary | null;
 };
 
-export type ProjectTasksResponse = { project: ProjectSummary; tasks: TaskListItem[] };
+export type ProjectTasksResponse = {
+  project: ProjectSummary;
+  tasks: TaskListItem[];
+  /** The id a new task gets when none is typed; null when the task source assigns ids (WonderCall). */
+  nextTaskId: string | null;
+};
+
+export const DEFAULT_TASK_PREFIX = "T";
+/** A project's task id prefix: a letter, then up to 9 letters or digits. */
+export const TASK_PREFIX_PATTERN = /^[A-Z][A-Z0-9]{0,9}$/;
+/** A task id typed by the owner, e.g. a board ticket like WCALL-482: letters, digits, `.`, `_`, `-`; no `/` or spaces. */
+export const TASK_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$/;
+export const taskPrefixOf = (project: { taskPrefix?: string }) => project.taskPrefix || DEFAULT_TASK_PREFIX;
 
 export type AttachmentRef = {
   id: string;
@@ -154,6 +169,8 @@ export type NewTaskInput = {
   type?: import("./task-types.ts").TaskType;
   /** Review tasks: the branch with the work to continue. A branch under the project's prefix is continued as is; any other gets a new agent branch that starts from it. */
   startFrom?: string;
+  /** The owner's own id for the task (Nightshift's task list only). Empty: the project prefix and the next number. */
+  id?: string;
 };
 
 export type TaskTypeUpdate = { type: import("./task-types.ts").TaskType | null };

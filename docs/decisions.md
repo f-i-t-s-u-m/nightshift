@@ -293,3 +293,11 @@ WonderCall's `apps/web/next.config.mjs` copies the committed `.public.env.local`
 - Testers get `NIGHTSHIFT_TESTERS` (that folder), `NIGHTSHIFT_NODE` (the node running Nightshift) and `NIGHTSHIFT_REMOTE`, so the command needs nothing on PATH.
 - Nightshift commits the agent's work before testers run, so `HEAD` holds the change under review.
 - Umbra is not modified. Requirements are Umbra's: `bun run serve`, Docker running, the sandbox image built, `UMBRA_SUBSCRIPTION_TOKEN` (or persisted in Setup). The e2e test uses a fake Umbra server with the same API.
+
+## D33. Task ids: the owner's own, else the project's prefix and the next number (2026-10-20)
+
+Nightshift's own tasks were always `T-<count + 1>`. The owner wants the board's ticket numbers, or at least a project-specific prefix.
+
+- **Own id per task** (new task dialog, `id` on `POST …/tasks`): letters, digits, `.`, `_`, `-`, up to 40, starting with a letter or digit (no `/` or spaces: the id is part of the branch, the worktree folder, URLs and settings keys). It must be unique in the project ignoring case (branch names are lower-cased), also against ids that only survive in run history. Only for Nightshift's own task list; WonderCall gives its tasks their ids, so a typed id is refused there.
+- **Otherwise the project's prefix** (project settings → Task id prefix, default `T`, a letter then up to 9 letters or digits, stored upper-case) and one above the highest number already used with that prefix, so own ids like `WC-10` and mixed histories never collide (the old count-based numbering could).
+- **Existing tasks keep their ids**: renaming one would mean renaming its branch, workspace and pull request, and an open PR would lose its task.

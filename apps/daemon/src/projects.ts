@@ -3,6 +3,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import type { EnvFileOverrides, NightshiftConfig, NewProjectInput, PreviewConfig, Project, ProjectUpdate, TaskSource, TaskSummary } from "@nightshift/core";
 import { GithubPrHost, LocalPrHost, run, Workspaces, type PrHost } from "@nightshift/git";
+import { DEFAULT_TASK_PREFIX, TASK_PREFIX_PATTERN } from "@nightshift/core";
 import { WonderCallMcpSource } from "@nightshift/sources";
 import type { Store } from "@nightshift/store";
 import { LocalTaskSource } from "./local-source.ts";
@@ -92,6 +93,7 @@ export async function validateNewProject(input: NewProjectInput, existing: Proje
     gitHost: input.gitHost === "local" ? "local" : "github",
     planMode: input.planMode === "plan" || input.planMode === "approve" ? input.planMode : "off",
     ...(input.pushMode === "approve" ? { pushMode: "approve" as const } : {}),
+    ...(normalizeTaskPrefix(input.taskPrefix) ? { taskPrefix: normalizeTaskPrefix(input.taskPrefix) } : {}),
     ...(input.kind ? { kind: input.kind } : {}),
     ...(input.brief?.trim() ? { brief: input.brief.trim() } : {}),
     ...(input.model ? { model: { provider: input.model.provider, modelId: input.model.modelId } } : {}),
@@ -124,6 +126,11 @@ export async function applyProjectUpdate(project: Project, update: ProjectUpdate
   if (update.kind !== undefined) next.kind = update.kind;
   if (update.brief !== undefined) next.brief = update.brief.trim() || undefined;
   if (update.paused !== undefined) next.paused = update.paused;
+  if (update.taskPrefix !== undefined) {
+    const prefix = normalizeTaskPrefix(update.taskPrefix);
+    if (prefix) next.taskPrefix = prefix;
+    else delete next.taskPrefix;
+  }
   if (update.planMode !== undefined) next.planMode = ["plan", "approve"].includes(update.planMode) ? update.planMode : "off";
   if (update.review !== undefined) next.review = update.review;
   if (update.testers !== undefined) {
@@ -293,4 +300,12 @@ export function normalizeEnvFiles(input: EnvFileOverrides | undefined): EnvFileO
     if (Object.keys(clean).length) out[file] = clean;
   }
   return Object.keys(out).length ? out : undefined;
+}
+
+/** Upper-cases and checks a task id prefix; empty or the default means "use the default". */
+export function normalizeTaskPrefix(input: string | undefined): string | undefined {
+  const prefix = (input ?? "").trim().replace(/-+$/, "").toUpperCase();
+  if (!prefix || prefix === DEFAULT_TASK_PREFIX) return undefined;
+  if (!TASK_PREFIX_PATTERN.test(prefix)) throw new Error(`The task id prefix ${input} is not valid: start with a letter, then up to 9 letters or digits (e.g. WC)`);
+  return prefix;
 }

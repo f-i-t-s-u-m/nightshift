@@ -1,5 +1,6 @@
 import { useId, useState, type ReactNode } from "react";
 import { Plus, Rows3, Share2, Sparkles, SquareTerminal, X } from "lucide-react";
+import { DEFAULT_TASK_PREFIX, TASK_PREFIX_PATTERN, taskPrefixOf } from "@nightshift/core";
 import type { CheckConfig, DatabaseConfig, DeviceMode, LocalFilesConfig, ModelChoice, NewProjectInput, PreviewConfig, PreviewService, PreviewTarget, Project, ProjectInspection, ProjectKind, ProjectSource, ProjectUpdate, TesterConfig } from "@nightshift/core";
 import { Button } from "@/components/ui/button";
 import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -52,6 +53,7 @@ export type ProjectForm = {
   remote: string;
   baseBranch: string;
   branchPrefix: string;
+  taskPrefix: string;
   setup: string;
   gitHost: "github" | "local";
   sourceType: SourceType;
@@ -149,6 +151,7 @@ const blank: ProjectForm = {
   remote: "origin",
   baseBranch: "main",
   branchPrefix: "nightshift/",
+  taskPrefix: DEFAULT_TASK_PREFIX,
   setup: "",
   gitHost: "github",
   sourceType: "local",
@@ -226,6 +229,7 @@ export const formFromProject = (p: Project): ProjectForm => ({
   remote: p.repo.remote,
   baseBranch: p.repo.baseBranch,
   branchPrefix: p.repo.branchPrefix,
+  taskPrefix: taskPrefixOf(p),
   setup: p.repo.setup ?? "",
   gitHost: p.gitHost,
   sourceType: p.source.type,
@@ -392,7 +396,10 @@ export const formErrors = (f: ProjectForm) => ({
       ? needsApp(f.previewServices) || serviceErrors(f.previewServices).some((e) => e.name || e.command || e.port || (f.previewTarget !== "device" && e.containerPort))
       : !f.previewCommand.trim() || (f.previewTarget === "container" && Boolean(portError(f.containerPort)))),
   database: f.dbMode === "existing" && !f.dbAdminUrl.trim(),
+  taskPrefix: f.sourceType === "local" && !TASK_PREFIX_PATTERN.test(cleanTaskPrefix(f.taskPrefix)),
 });
+
+const cleanTaskPrefix = (value: string) => value.trim().replace(/-+$/, "").toUpperCase() || DEFAULT_TASK_PREFIX;
 
 export const formValid = (f: ProjectForm) => !Object.values(formErrors(f)).some(Boolean);
 
@@ -409,6 +416,7 @@ export const formToInput = (f: ProjectForm): NewProjectInput => {
     planMode: f.planMode,
     pushMode: f.pushMode,
     review: f.review,
+    ...(f.sourceType === "local" ? { taskPrefix: cleanTaskPrefix(f.taskPrefix) } : {}),
     ...(f.brief.trim() ? { brief: f.brief.trim() } : {}),
     ...(preview ? { preview } : {}),
     ...(database.mode !== "none" ? { database } : {}),
@@ -433,6 +441,7 @@ const parts = (f: ProjectForm) => ({
   brief: f.brief.trim(),
   paused: f.paused,
   repo: { baseBranch: f.baseBranch.trim() || "main", branchPrefix: f.branchPrefix.trim(), setup: f.setup.trim(), remote: f.remote.trim() || "origin" },
+  taskPrefix: cleanTaskPrefix(f.taskPrefix),
   checks: cleanChecks(f),
   gitHost: f.gitHost,
   source: sourceOf(f),
@@ -1132,6 +1141,30 @@ export function ProjectFormSections({ value: f, onChange, mode, prefix }: { valu
             {mode === "edit" ? (
               <Field id={id("prefix")} label="Branch prefix">
                 <Input id={id("prefix")} className="font-mono" value={f.branchPrefix} onChange={(e) => set("branchPrefix", e.target.value)} placeholder="nightshift/" spellCheck={false} />
+              </Field>
+            ) : null}
+            {f.sourceType === "local" ? (
+              <Field
+                id={id("task-prefix")}
+                label="Task id prefix"
+                error={formErrors(f).taskPrefix}
+                hint={
+                  formErrors(f).taskPrefix
+                    ? "Start with a letter, then up to 9 letters or digits (e.g. WC)."
+                    : `New tasks without their own id become ${cleanTaskPrefix(f.taskPrefix)}-1, ${cleanTaskPrefix(f.taskPrefix)}-2, … Existing tasks keep theirs.`
+                }
+              >
+                <Input
+                  id={id("task-prefix")}
+                  className="font-mono uppercase"
+                  value={f.taskPrefix}
+                  onChange={(e) => set("taskPrefix", e.target.value.replace(/\s/g, "").toUpperCase())}
+                  placeholder={DEFAULT_TASK_PREFIX}
+                  maxLength={10}
+                  aria-invalid={formErrors(f).taskPrefix}
+                  aria-describedby={`${id("task-prefix")}-hint`}
+                  spellCheck={false}
+                />
               </Field>
             ) : null}
             <Field id={id("host")} label="Git host">

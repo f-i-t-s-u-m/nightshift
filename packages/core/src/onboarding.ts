@@ -173,6 +173,7 @@ export type ProjectUpdate = Partial<{
   skills: Record<string, boolean | null>;
   pushMode: "auto" | "approve";
   localFiles: import("./workspace.ts").LocalFilesConfig | null;
+  taskPrefix: string;
 }>;
 
 export type BriefResponse = { brief: string };
