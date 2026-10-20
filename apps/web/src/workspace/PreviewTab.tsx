@@ -309,6 +309,17 @@ function LinkLine({ url, name, status }: { url: string; name: string; status: Pr
   );
 }
 
+/** The app's port; while it runs (and speaks HTTP) a click opens it on 127.0.0.1 in a new tab, like the link. */
+function PortLink({ port, status, web = true }: { port: number; status: PreviewInfo["status"]; web?: boolean }) {
+  const code = <code className="font-mono text-foreground">{port}</code>;
+  if (!web || status !== "running") return code;
+  return (
+    <a href={`http://127.0.0.1:${port}`} target="_blank" rel="noopener noreferrer" title={`Open http://127.0.0.1:${port} in a new tab`} className="underline-offset-4 hover:underline">
+      {code}
+    </a>
+  );
+}
+
 const INTERACTIVE = "a,button,summary,details,section,input,[role=tab]";
 
 function ServiceRow({
@@ -410,7 +421,7 @@ function ServiceRow({
         )}
         {service.port ? (
           <span className="text-xs text-muted-foreground">
-            port <code className="font-mono text-foreground">{service.port}</code>
+            port <PortLink port={service.port} status={service.status} />
           </span>
         ) : null}
       </div>
@@ -567,7 +578,7 @@ function SharedServiceRow({
           )}
           {service.port ? (
             <span className="text-xs text-muted-foreground">
-              port <code className="font-mono text-foreground">{service.port}</code>
+              port <PortLink port={service.port} status={service.status} web={check === "http"} />
             </span>
           ) : null}
         </div>
@@ -812,7 +823,9 @@ function SinglePreview({
         </Row>
         {preview.port ? (
           <Row label="Port">
-            <code className="font-mono text-xs">{preview.port}</code>
+            <span className="text-xs">
+              <PortLink port={preview.port} status={preview.status} />
+            </span>
           </Row>
         ) : null}
         {containerPort ? (
