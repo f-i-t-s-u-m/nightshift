@@ -1,0 +1,83 @@
+#!/usr/bin/env node
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import path from "node:path";
+
+const root = process.env.FAKE_GH_ROOT;
+const args = process.argv.slice(2);
+const out = (s) => process.stdout.write(typeof s === "string" ? `${s}\n` : `${JSON.stringify(s)}\n`);
+const fail = (msg, code = 1) => {
+  process.stderr.write(`${msg}\n`);
+  process.exit(code);
+};
+const flag = (name) => {
+  const i = args.indexOf(name);
+  return i >= 0 ? args[i + 1] : undefined;
+};
+const bare = (slug) => path.join(root, `${slug}.git`);
+const statePath = path.join(root, "state.json");
+const state = () => (existsSync(statePath) ? JSON.parse(readFileSync(statePath, "utf8")) : { prs: [] });
+const save = (s) => writeFileSync(statePath, JSON.stringify(s, null, 2));
+const log = (line) => writeFileSync(path.join(root, "calls.log"), `${line}\n`, { flag: "a" });
+const repoOfCwd = () => {
+  const url = execFileSync("git", ["remote", "get-url", "origin"], { encoding: "utf8" }).trim();
+  const m = url.replace(/^file:\/\//, "").match(new RegExp(`^${root.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/(.+)\\.git$`));
+  if (!m) fail(`not a fake GitHub repository: ${url}`);
+  return m[1];
+};
+const headOf = (slug, branch) => {
+  try {
+    return execFileSync("git", ["rev-parse", `refs/heads/${branch}`], { cwd: bare(slug), encoding: "utf8" }).trim();
+  } catch {
+    return null;
+  }
+};
+
+mkdirSync(root, { recursive: true });
+log(args.join(" "));
+const [a, b] = args;
+
+if (a === "--version") out("gh version 2.99.0 (fake)");
+else if (a === "config" && b === "get") out("https");
+else if (a === "api" && b === "user") {
+  if (existsSync(path.join(root, "logged-out"))) fail("You are not logged into any GitHub hosts. To log in, run: gh auth login", 4);
+  out("tester");
+} else if (a === "api" && b === "user/orgs") out("acme");
+else if (a === "api") out([]);
+else if (a === "repo" && b === "view") {
+  const slug = args[2];
+  if (!existsSync(bare(slug))) fail(`GraphQL: Could not resolve to a Repository with the name '${slug}'.`);
+  const fields = flag("--json");
+  if (fields === "isEmpty") out(String(execFileSync("git", ["for-each-ref"], { cwd: bare(slug), encoding: "utf8" }).trim() === ""));
+  else out({ url: `file://${bare(slug).replace(/\.git$/, "")}`, sshUrl: `file://${bare(slug)}`, name: slug.split("/")[1] });
+} else if (a === "repo" && b === "create") {
+  const slug = args[2];
+  if (existsSync(bare(slug))) fail(`GraphQL: Name already exists on this account (createRepository)`);
+  mkdirSync(path.dirname(bare(slug)), { recursive: true });
+  execFileSync("git", ["init", "-q", "--bare", "-b", "main", bare(slug)]);
+  writeFileSync(path.join(bare(slug), "nightshift-fake.json"), JSON.stringify({ visibility: args.includes("--public") ? "public" : "private", description: flag("--description") ?? null }));
+  out(`https://github.com/${slug}`);
+} else if (a === "repo" && b === "edit") {
+  execFileSync("git", ["symbolic-ref", "HEAD", `refs/heads/${flag("--default-branch")}`], { cwd: bare(args[2]) });
+} else if (a === "pr" && b === "list") {
+  const slug = repoOfCwd();
+  const head = flag("--head");
+  const prs = state().prs.filter((p) => p.repo === slug && p.state === "OPEN" && (!head || p.head === head));
+  out(prs.map((p) => ({ number: p.number, url: p.url, headRefName: p.head, baseRefName: p.base, headRefOid: headOf(slug, p.head) })));
+} else if (a === "pr" && b === "create") {
+  const slug = repoOfCwd();
+  const s = state();
+  const head = flag("--head");
+  if (!headOf(slug, head)) fail(`pull request create failed: head branch ${head} not found`);
+  const number = s.prs.filter((p) => p.repo === slug).length + 1;
+  const pr = { repo: slug, number, url: `https://github.com/${slug}/pull/${number}`, head, base: flag("--base"), title: flag("--title"), body: flag("--body"), state: "OPEN" };
+  s.prs.push(pr);
+  save(s);
+  out(pr.url);
+} else if (a === "pr" && b === "view") {
+  const slug = repoOfCwd();
+  const pr = state().prs.find((p) => p.repo === slug && p.number === Number(args[2]));
+  if (!pr) fail("no pull requests found");
+  out({ state: pr.state, headRefOid: headOf(slug, pr.head), statusCheckRollup: [], reviews: [], comments: [] });
+} else if ((a === "run" || a === "issue") && b === "list") out([]);
+else fail(`fake gh: unsupported command: ${args.join(" ")}`);

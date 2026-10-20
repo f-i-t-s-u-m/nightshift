@@ -1,0 +1,1 @@
+{"root":["./src/api.ts","./src/config.ts","./src/fs.ts","./src/index.ts","./src/mcp-contract.ts","./src/models.ts","./src/onboarding.ts","./src/projects.ts","./src/runs.ts","./src/sessions.ts","./src/tasks.ts","./src/verification.ts","./src/workspace.ts"],"version":"5.9.3"}

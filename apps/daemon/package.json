@@ -1,0 +1,36 @@
+{
+  "name": "@nightshift/daemon",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "nightshift": "./dist/cli.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "dev": "node --watch dist/cli.js serve"
+  },
+  "dependencies": {
+    "@earendil-works/pi-ai": "1.3.0",
+    "@nightshift/core": "workspace:*",
+    "@nightshift/git": "workspace:*",
+    "@nightshift/runner-pi": "workspace:*",
+    "@nightshift/sources": "workspace:*",
+    "@nightshift/store": "workspace:*",
+    "pg": "8.23.1"
+  },
+  "devDependencies": {
+    "@nightshift/tsconfig": "workspace:*",
+    "@nightshift/wondercall-mock": "workspace:*",
+    "@types/pg": "8.23.1"
+  }
+}
