@@ -167,7 +167,7 @@ export async function scanLocalFiles(root: string, preview: PreviewConfig | unde
   return { root, candidates, rewrites, notes, source };
 }
 
-function ensureIgnored(worktree: string, rel: string) {
+export function ensureIgnored(worktree: string, rel: string) {
   try {
     execFileSync("git", ["check-ignore", "-q", rel], { cwd: worktree, stdio: "ignore" });
   } catch {

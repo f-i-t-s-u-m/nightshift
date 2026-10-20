@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import type { NightshiftConfig, NewProjectInput, PreviewConfig, Project, ProjectUpdate, TaskSource, TaskSummary } from "@nightshift/core";
+import type { EnvFileOverrides, NightshiftConfig, NewProjectInput, PreviewConfig, Project, ProjectUpdate, TaskSource, TaskSummary } from "@nightshift/core";
 import { GithubPrHost, LocalPrHost, run, Workspaces, type PrHost } from "@nightshift/git";
 import { WonderCallMcpSource } from "@nightshift/sources";
 import type { Store } from "@nightshift/store";
@@ -232,6 +232,7 @@ export function normalizePreview(input: PreviewConfig | null | undefined): Previ
         portEnv: s.portEnv?.trim() || "PORT",
         readyPath: s.readyPath?.trim() || "/",
         ...(s.env && Object.keys(s.env).length ? { env: s.env } : {}),
+        ...(normalizeEnvFiles(s.envFiles) ? { envFiles: normalizeEnvFiles(s.envFiles) } : {}),
         ...(s.primary && !s.shared ? { primary: true } : {}),
         ...(s.shared ? { shared: true } : {}),
         ...(s.shared && validPort(s.port) ? { port: Number(s.port) } : {}),
@@ -262,6 +263,7 @@ export function normalizePreview(input: PreviewConfig | null | undefined): Previ
     portEnv: primary?.portEnv ?? (input!.portEnv?.trim() || "PORT"),
     readyPath: primary?.readyPath ?? (input!.readyPath?.trim() || "/"),
     ...(input!.env && Object.keys(input!.env).length ? { env: input!.env } : {}),
+    ...(!services.length && normalizeEnvFiles(input!.envFiles) ? { envFiles: normalizeEnvFiles(input!.envFiles) } : {}),
     target,
     ...(target === "container"
       ? { container: { image } }
@@ -271,4 +273,24 @@ export function normalizePreview(input: PreviewConfig | null | undefined): Previ
     ...(validPort(input!.containerPort) && !services.length ? { containerPort: Number(input!.containerPort) } : {}),
     ...(target === "device" ? { device: { mode: mode === "expo-go" || mode === "ios-simulator" || mode === "android-emulator" ? mode : "lan" } } : {}),
   };
+}
+
+const ENV_KEY = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/** Checks `envFiles`: paths stay inside the app's folder, names are valid, values are single lines. */
+export function normalizeEnvFiles(input: EnvFileOverrides | undefined): EnvFileOverrides | undefined {
+  if (!input || typeof input !== "object") return undefined;
+  const out: EnvFileOverrides = {};
+  for (const [raw, values] of Object.entries(input)) {
+    const file = raw.trim().replace(/^\.\/+/, "");
+    if (!file || path.isAbsolute(file) || file.split("/").includes("..")) throw new Error(`The file ${raw} must be inside the app's folder`);
+    const clean: Record<string, string> = {};
+    for (const [key, value] of Object.entries(values ?? {})) {
+      if (!ENV_KEY.test(key)) throw new Error(`${key} in ${file} is not a valid variable name`);
+      if (typeof value !== "string" || /[\r\n\0]/.test(value)) throw new Error(`The value of ${key} in ${file} must be one line`);
+      clean[key] = value;
+    }
+    if (Object.keys(clean).length) out[file] = clean;
+  }
+  return Object.keys(out).length ? out : undefined;
 }

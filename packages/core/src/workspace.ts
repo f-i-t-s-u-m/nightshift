@@ -15,9 +15,18 @@ export type PreviewService = {
   shared?: boolean;
   port?: number;
   check?: "http" | "tcp";
+  envFiles?: EnvFileOverrides;
 };
 
+/**
+ * Values Nightshift writes into dotenv-style files when an app starts, keyed by the file's path in the app's
+ * folder, then variable name. Only the task's workspace copy changes, and git does not see the edit. For apps
+ * whose own config loads a file over the environment Nightshift passes (e.g. `next.config.mjs` reading `.public.env.local`).
+ */
+export type EnvFileOverrides = Record<string, Record<string, string>>;
+
 export type PreviewConfig = {
+  envFiles?: EnvFileOverrides;
   services?: PreviewService[];
   install?: string;
   command: string;
@@ -49,7 +58,24 @@ export type EnvSource = "task" | "apps" | "preview" | "rewrite" | "service" | "p
 export type EnvEntry = { key: string; value: string; source: EnvSource; secret: boolean };
 
 /** A value in a `.env` file the app's framework loads itself; `overriddenBy` is set when Nightshift passes the same key. */
-export type EnvFileEntry = { file: string; key: string; value: string; secret: boolean; overriddenBy: EnvSource | null };
+export type EnvFileEntry = {
+  /** Path from the repository root. */
+  file: string;
+  /** Path in the app's folder (the key used in `envFiles`). */
+  name: string;
+  key: string;
+  /** The value in the file as the repository has it (before any override). */
+  value: string;
+  secret: boolean;
+  /** Set for standard files the framework loads itself, when Nightshift passes the same key in the environment (which wins). */
+  overriddenBy: EnvSource | null;
+  /** True for `.env`, `.env.local`, … that Vite, Next.js and Bun load and let the environment win over. */
+  standard: boolean;
+  /** Files in the app's folder that mention this file, e.g. `next.config.mjs` (it may load it over the environment). */
+  loadedBy: string[];
+  /** The value Nightshift writes into the file for this app (templates unfilled), if any. */
+  override: string | null;
+};
 
 /** `GET …/workspace/preview/env?service=`: the env a service started with, the env it would get now, and its `.env` files. */
 export type ServiceEnvResponse = {
@@ -73,7 +99,12 @@ export type ServiceEnvResponse = {
 };
 
 /** `PUT …/workspace/preview/env?service=`: changes the app's own env in the project settings. */
-export type ServiceEnvUpdate = { set?: Record<string, string>; remove?: string[] };
+export type ServiceEnvUpdate = {
+  set?: Record<string, string>;
+  remove?: string[];
+  /** Changes what Nightshift writes into one file in the app's folder (`path` relative to it). */
+  file?: { path: string; set?: Record<string, string>; remove?: string[] };
+};
 
 export type PreviewServiceInfo = {
   name: string;

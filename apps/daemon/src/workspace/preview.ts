@@ -4,6 +4,7 @@ import { connect, createServer } from "node:net";
 import { networkInterfaces } from "node:os";
 import path from "node:path";
 import { defaultImage, inferInstall } from "./local-files.ts";
+import { EnvFileOverlays } from "./env-files.ts";
 import type { DeviceMode, EnvEntry, EnvSource, PreviewConfig, PreviewDiagnosis, PreviewInfo, PreviewService, PreviewServiceInfo, PreviewTarget } from "@nightshift/core";
 
 type Svc = {
@@ -102,7 +103,7 @@ export function previewHint(log: string[], port: number, status: PreviewInfo["st
 export function servicesOf(config: PreviewConfig): Array<PreviewService & { primary: boolean }> {
   const list: PreviewService[] = config.services?.length
     ? config.services
-    : [{ name: "app", command: config.command, portEnv: config.portEnv, readyPath: config.readyPath, env: config.env, primary: true }];
+    : [{ name: "app", command: config.command, portEnv: config.portEnv, readyPath: config.readyPath, env: config.env, envFiles: config.envFiles, primary: true }];
   const primaryName = list.find((s) => s.primary && !s.shared)?.name ?? list.find((s) => !s.shared)?.name ?? list[0]?.name;
   return list.map((s) => ({ ...s, primary: s.name === primaryName && !s.shared }));
 }
@@ -131,6 +132,18 @@ export function tcpProbe(port: number, host = "127.0.0.1", timeoutMs = 1500): Pr
     });
     socket.once("error", () => done(false));
   });
+}
+
+/** Every app's file overrides, by path from the workspace root, with templates filled. */
+export function overlayFiles(defs: PreviewService[], fill: (value: string) => string): Record<string, Record<string, string>> {
+  const out: Record<string, Record<string, string>> = {};
+  for (const d of defs) {
+    for (const [file, values] of Object.entries(d.envFiles ?? {})) {
+      const rel = path.posix.join(d.cwd ?? "", file);
+      out[rel] = { ...out[rel], ...Object.fromEntries(Object.entries(values).map(([k, v]) => [k, fill(v)])) };
+    }
+  }
+  return out;
 }
 
 const SECRET_KEY = /SECRET|TOKEN|PASSWORD|PASSWD|PRIVATE|CREDENTIAL|API_?KEY|ACCESS_?KEY|_KEY$|^KEY$|SALT|SIGNING/i;
@@ -165,6 +178,7 @@ export class PreviewManager {
   private readonly groups = new Map<string, Group>();
   private readonly pidFile: string;
   readonly diagnoses = new Map<string, { diagnosis: PreviewDiagnosis | null; diagnosing: boolean }>();
+  readonly overlays: EnvFileOverlays;
   onFailed: ((projectId: string, taskId: string, service: string) => void) | null = null;
   sharedRoot: ((projectId: string) => string) | null = null;
   stablePort: ((projectId: string, service: string) => Promise<number>) | null = null;
@@ -176,6 +190,7 @@ export class PreviewManager {
   ) {
     mkdirSync(dataDir, { recursive: true });
     this.pidFile = path.join(dataDir, "previews.json");
+    this.overlays = new EnvFileOverlays(path.join(dataDir, "env-originals"));
   }
 
   reapLeftovers(): number[] {
@@ -428,6 +443,13 @@ export class PreviewManager {
     }
     const { vars, env: crossEnv } = this.templateVars(g, defs, lan);
     const fill = (value: string) => value.replace(/\{\{\s*([\w-]+\.(?:url|publicUrl|port|lanUrl|host))\s*\}\}/g, (m, k: string) => vars[k] ?? m);
+    if (g.taskId !== SHARED) {
+      const notes = this.overlays.apply(g.projectId, g.taskId, root, overlayFiles(defs, fill));
+      for (const d of wanted) {
+        const own = Object.keys(d.envFiles ?? {}).map((f) => path.posix.join(d.cwd ?? "", f));
+        for (const note of notes) if (own.some((f) => note.includes(f))) g.services.get(d.name)!.log.push(`[nightshift] ${note}`);
+      }
+    }
     for (const d of wanted) {
       const s = g.services.get(d.name)!;
       if (s.status !== "starting") continue;
@@ -606,13 +628,22 @@ export class PreviewManager {
   }
 
 
+  /** Writes the file overrides again with the ports of the task's running apps (after they were restored for a merge). */
+  reapplyOverlays(projectId: string, taskId: string, root: string, config: PreviewConfig) {
+    const g = this.groups.get(this.key(projectId, taskId));
+    if (!g || ![...g.services.values()].some((s) => s.status !== "stopped")) return;
+    const defs = servicesOf(config).filter((d) => !d.shared);
+    const { vars } = this.templateVars(g, defs, g.target === "device" ? lanAddress() : null);
+    this.overlays.apply(projectId, taskId, root, overlayFiles(defs, (value) => value.replace(/\{\{\s*([\w-]+\.(?:url|publicUrl|port|lanUrl|host))\s*\}\}/g, (m, k: string) => vars[k] ?? m)));
+  }
+
   runningEnv(projectId: string, taskId: string, service: string): EnvEntry[] | null {
     const s = this.svcOf(projectId, taskId, service);
     return s && s.status !== "stopped" && s.env ? s.env : null;
   }
 
   /** The env `service` gets on its next start, with the ports known now. */
-  plannedEnv(projectId: string, taskId: string, config: PreviewConfig, env: Record<string, string>, service: string): EnvEntry[] {
+  plannedEnv(projectId: string, taskId: string, config: PreviewConfig, env: Record<string, string>, service: string, fillOut?: { fill: (value: string) => string }): EnvEntry[] {
     const all = servicesOf(config);
     const d = all.find((x) => x.name === service);
     if (!d) throw new Error(`No preview service named ${service}`);
@@ -633,6 +664,7 @@ export class PreviewManager {
     };
     const { vars, env: crossEnv } = this.templateVars(g, defs, target === "device" ? lanAddress() : null);
     const fill = (value: string) => value.replace(/\{\{\s*([\w-]+\.(?:url|publicUrl|port|lanUrl|host))\s*\}\}/g, (m, k: string) => vars[k] ?? m);
+    if (fillOut) fillOut.fill = fill;
     const s = g.services.get(d.name);
     const inContainer = target === "container" || (d.target === "container" && target !== "device");
     const inner = s?.inner || (inContainer ? d.containerPort : undefined) || s?.port;
@@ -642,6 +674,7 @@ export class PreviewManager {
 
   forget(projectId: string, taskId: string) {
     this.groups.delete(this.key(projectId, taskId));
+    this.overlays.drop(projectId, taskId);
   }
 
   async stopAll() {

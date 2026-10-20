@@ -2,7 +2,8 @@ import { existsSync, readFileSync } from "node:fs";
 import { createServer } from "node:net";
 import path from "node:path";
 import type { ActionRun, ActionsResponse, LocalFilesScan, LocalFilesSyncResult, NightshiftConfig, PreviewConfig, PreviewDetectResponse, PreviewDiagnosis, PreviewFix, Project, Run, ServiceEnvResponse, ServiceEnvUpdate, WorkspaceInfo } from "@nightshift/core";
-import type { EnvEntry } from "@nightshift/core";
+import type { EnvEntry, EnvFileEntry } from "@nightshift/core";
+import { envFilesIn, loadersOf, STANDARD_ENV_FILES } from "./env-files.ts";
 import { isActivePhase } from "@nightshift/core";
 import { GithubPrHost, run as exec, WorktreeOps } from "@nightshift/git";
 import type { Store } from "@nightshift/store";
@@ -53,9 +54,6 @@ const portFree = (port: number) =>
     server.once("error", () => resolve(false));
     server.listen(port, "127.0.0.1", () => server.close(() => resolve(true)));
   });
-
-/** The files Vite, Next.js and Bun load in development, in the order they override each other. */
-const DOTENV_FILES = [".env", ".env.development", ".env.local", ".env.development.local"];
 
 /** Values that exist only while apps run, so they differ from the start env without a restart helping. */
 const RUNTIME_KEYS = /^PREVIEW_(PORT|URL_.+)$/;
@@ -166,20 +164,47 @@ export class WorkspaceService {
     const rewritten = rewriteEnv(project.localFiles, project.preview?.services?.length ? def : null);
     const tag = (list: EnvEntry[]) => list.map((e) => (e.key in rewritten && !(e.key in own) && (e.source === "service" || e.source === "preview") ? { ...e, source: "rewrite" as const } : e));
     const running = this.previews.runningEnv(projectId, taskId, def.name);
-    const next = tag(this.previews.plannedEnv(projectId, taskId, config, this.env(projectId, taskId), def.name));
+    const filler = { fill: (value: string) => value };
+    const next = tag(this.previews.plannedEnv(projectId, taskId, config, this.env(projectId, taskId), def.name, filler));
     const current = running ? tag(running) : null;
     const before = new Map((current ?? []).map((e) => [e.key, e.value]));
     const after = new Map(next.map((e) => [e.key, e.value]));
-    const changed = current ? [...new Set([...before.keys(), ...after.keys()])].filter((k) => k !== (def.portEnv ?? "PORT") && !RUNTIME_KEYS.test(k) && before.get(k) !== after.get(k)).sort() : [];
+    const changed: string[] = current ? [...new Set([...before.keys(), ...after.keys()])].filter((k) => k !== (def.portEnv ?? "PORT") && !RUNTIME_KEYS.test(k) && before.get(k) !== after.get(k)).sort() : [];
     const root = def.shared ? project.repo.path : this.ops(projectId, taskId).root;
     const dir = path.join(root, def.cwd ?? "");
     const passed = new Map((current ?? next).map((e) => [e.key, e.source]));
-    const files = DOTENV_FILES.flatMap((name) => {
-      const file = path.join(dir, name);
-      if (!existsSync(file)) return [];
-      const rel = path.relative(root, file);
-      return parseEnv(readFileSync(file, "utf8")).map((v) => ({ file: rel, key: v.key, value: v.value, secret: isSecretKey(v.key), overriddenBy: passed.get(v.key) ?? null }));
+    const overrides = def.shared ? {} : (def.envFiles ?? {});
+    const names = [...new Set([...envFilesIn(dir), ...Object.keys(overrides)])];
+    const loaders = loadersOf(dir, names);
+    const files: EnvFileEntry[] = names.flatMap((name) => {
+      const full = path.join(dir, name);
+      const rel = path.relative(root, full);
+      const original = (def.shared ? null : this.previews.overlays.original(projectId, taskId, rel)) ?? (existsSync(full) ? readFileSync(full, "utf8") : "");
+      const standard = STANDARD_ENV_FILES.includes(name);
+      const vars = parseEnv(original);
+      const extra = Object.keys(overrides[name] ?? {}).filter((k) => !vars.some((v) => v.key === k));
+      return [...vars, ...extra.map((key) => ({ key, value: "" }))].map((v) => ({
+        file: rel,
+        name,
+        key: v.key,
+        value: v.value,
+        secret: isSecretKey(v.key),
+        overriddenBy: standard ? (passed.get(v.key) ?? null) : null,
+        standard,
+        loadedBy: loaders[name] ?? [],
+        override: overrides[name]?.[v.key] ?? null,
+      }));
     });
+    // A file override that differs from what the workspace file holds now needs a restart (it is written at start).
+    if (current) {
+      for (const [name, values] of Object.entries(overrides)) {
+        const full = path.join(dir, name);
+        const now = existsSync(full) ? parseEnv(readFileSync(full, "utf8")) : [];
+        for (const [key, value] of Object.entries(values)) if (now.find((v) => v.key === key)?.value !== filler.fill(value)) changed.push(`${key} (${name})`);
+      }
+      const applied = new Set(this.previews.overlays.applied(projectId, taskId));
+      for (const rel of applied) if (rel.startsWith(def.cwd ? `${def.cwd}/` : "") && !(path.relative(dir, path.join(root, rel)) in overrides) && path.dirname(rel) === (def.cwd ?? ".")) changed.push(`${path.basename(rel)} (back to the original)`);
+    }
     const hide = <T extends { value: string; secret: boolean }>(e: T): T => (reveal ? e : { ...e, value: e.secret ? "••••••••" : e.value.replace(/\/\/([^:/@\s]+):([^@\s]+)@/, "//$1:••••••••@") });
     const info = this.previews.info(projectId, taskId, project.preview).services.find((x) => x.name === def.name);
     const defs = servicesOf(project.preview!);
@@ -195,27 +220,55 @@ export class WorkspaceService {
       startedAt: info?.startedAt ?? null,
       running: current?.map(hide) ?? null,
       next: next.map(hide),
-      files: files.map(hide),
+      files: files.map((f) => ({ ...hide(f), override: f.override === null ? null : hide({ value: f.override, secret: f.secret }).value })),
       changed,
       revealed: reveal,
     };
   }
 
+  /** Merges the base branch with the original env files in place (git refuses to merge over hidden edits), then writes the task's values again. */
+  async pullBase(projectId: string, taskId: string) {
+    const ops = this.ops(projectId, taskId);
+    this.previews.overlays.restore(projectId, taskId, ops.root);
+    try {
+      return await ops.pullBase();
+    } finally {
+      const project = this.deps.project(projectId);
+      if (project.preview) this.previews.reapplyOverlays(projectId, taskId, ops.root, this.withLocalEnv(project));
+    }
+  }
+
   /** Sets or removes variables in the app's own env in the project settings. Running apps keep their env until restarted. */
   async setServiceEnv(projectId: string, taskId: string, service: string | undefined, update: ServiceEnvUpdate): Promise<ServiceEnvResponse> {
     const { config, def } = this.serviceDef(projectId, service);
-    const set = Object.entries(update?.set ?? {});
-    const remove = update?.remove ?? [];
+    const file = update?.file;
+    const set = Object.entries(file ? (file.set ?? {}) : (update?.set ?? {}));
+    const remove = (file ? file.remove : update?.remove) ?? [];
     if (!set.length && !remove.length) throw new WorkspaceError("There is nothing to change", 400);
     const locked = new Set([def.portEnv ?? "PORT", "HOST", "BROWSER"]);
     for (const [key, value] of set) {
       if (!ENV_KEY.test(key)) throw new WorkspaceError(`${key || "(empty)"} is not a valid variable name: use letters, digits and _, not starting with a digit`, 400);
-      if (locked.has(key)) throw new WorkspaceError(`Nightshift sets ${key} itself when it starts the app, so a value here would be ignored`, 400);
+      if (locked.has(key) && !file) throw new WorkspaceError(`Nightshift sets ${key} itself when it starts the app, so a value here would be ignored`, 400);
       if (typeof value === "string" && value.includes("••••••••")) throw new WorkspaceError(`The value of ${key} is still masked: choose Show secrets and enter the real value`, 400);
       if (typeof value !== "string" || value.length > 4000 || /[\r\n\0]/.test(value)) throw new WorkspaceError(`The value of ${key} must be one line of at most 4000 characters`, 400);
     }
     const next: PreviewConfig = structuredClone(config);
     const target = next.services?.length ? next.services.find((x) => x.name === def.name)! : next;
+    if (file) {
+      if (def.shared) throw new WorkspaceError("Shared services run from the project folder, so Nightshift does not change their files", 400);
+      const name = String(file.path ?? "").trim().replace(/^\.\/+/, "");
+      if (!name || path.isAbsolute(name) || name.split("/").includes("..")) throw new WorkspaceError("The file must be inside the app's folder", 400);
+      const values = { ...target.envFiles?.[name] };
+      for (const key of remove) delete values[key];
+      for (const [key, value] of set) values[key] = value;
+      const files = { ...target.envFiles };
+      if (Object.keys(values).length) files[name] = values;
+      else delete files[name];
+      if (Object.keys(files).length) target.envFiles = files;
+      else delete target.envFiles;
+      await this.deps.savePreview(projectId, next);
+      return this.serviceEnv(projectId, taskId, def.name);
+    }
     const env = { ...target.env };
     for (const key of remove) delete env[key];
     for (const [key, value] of set) env[key] = value;

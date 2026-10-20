@@ -207,9 +207,8 @@ export function startHttp(options: {
       return send(res, 200, ops.create(String(b.path ?? ""), b.kind === "folder" ? "folder" : "file"));
     }
     if (rest === "/git/pull-base" && m === "POST") {
-      const ops = ws.ops(projectId, taskId);
       ws.editable(projectId, taskId);
-      return send(res, 200, await ops.pullBase());
+      return send(res, 200, await ws.pullBase(projectId, taskId));
     }
     if (rest === "/file" && m === "PUT") {
       const b = await body();

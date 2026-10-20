@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import { Eye, EyeOff, Pencil, Plus, RefreshCw, RotateCcw, Search, Trash2, Variable } from "lucide-react";
 import { toast } from "sonner";
-import type { EnvEntry, EnvFileEntry, EnvSource, ServiceEnvResponse } from "@nightshift/core";
+import type { EnvEntry, EnvFileEntry, EnvSource, ServiceEnvResponse, ServiceEnvUpdate } from "@nightshift/core";
 import { formatDateTime, formatRelative, type Tone } from "@nightshift/ui";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -36,7 +36,11 @@ function SourceBadge({ source }: { source: EnvSource }) {
 
 const MASK = "••••••••";
 
-type Editing = { id: string; key: string; value: string; isNew: boolean };
+/** `file` set: the value is written into that file (path in the app's folder) instead of the app's env. */
+type Editing = { id: string; key: string; value: string; isNew: boolean; file?: string };
+
+/** A value the app actually ends up with that still points at a fixed local address. */
+const isStale = (f: EnvFileEntry) => f.override === null && (f.standard ? !f.overriddenBy : true) && FIXED_LOCAL.test(f.value);
 
 /** Puts a template where it belongs: in place of a fixed localhost origin (keeping the path), else at the cursor. */
 function insertTemplate(value: string, template: string, cursor: number | null) {
@@ -137,7 +141,14 @@ function EnvEditor({
         </div>
       ) : null}
       <p className="text-xs text-muted-foreground">
-        Saved in the project's preview settings for {app}, so every task gets it. {running ? `Restart ${app} afterwards to use it.` : "Used from the next start."}
+        {editing.file ? (
+          <>
+            Written into <code className="font-mono">{editing.file}</code> in each task's workspace when {app} starts. The file in the repository is not changed and git does not see the edit.{" "}
+          </>
+        ) : (
+          <>Saved in the project's preview settings for {app}, so every task gets it. </>
+        )}
+        {running ? `Restart ${app} afterwards to use it.` : "Used from the next start."}
       </p>
       {error ? (
         <p className="text-xs text-destructive" role="alert">
@@ -177,7 +188,7 @@ type RowEdit = {
   busy: boolean;
   revealed: boolean;
   start: (next: Editing) => void;
-  remove: (key: string) => void;
+  remove: (key: string, file?: string) => void;
 };
 
 /** What to put in the editor for a key: the saved value (templates intact) when the app has one, else what is shown. */
@@ -254,48 +265,100 @@ function EnvTable({ entries, previous, query, edit }: { entries: EnvEntry[]; pre
 
 function FileTable({ files, query, edit }: { files: EnvFileEntry[]; query: string; edit: RowEdit }) {
   const q = query.trim().toLowerCase();
-  const shown = files.filter((f) => !q || f.key.toLowerCase().includes(q) || f.value.toLowerCase().includes(q));
-  if (!shown.length) return <p className="px-1 text-sm text-muted-foreground">{files.length ? "No variable matches." : "No .env files in this app's folder."}</p>;
+  const shown = files.filter((f) => !q || f.key.toLowerCase().includes(q) || f.value.toLowerCase().includes(q) || (f.override ?? "").toLowerCase().includes(q));
+  if (!shown.length) return <p className="px-1 text-sm text-muted-foreground">{files.length ? "No variable matches." : "No env files in this app's folder."}</p>;
+  const groups = [...new Set(shown.map((f) => f.name))].map((name) => ({ name, entries: shown.filter((f) => f.name === name) }));
   return (
-    <ul className="divide-y rounded-lg border text-sm">
-      {shown.map((f) => {
-        const stale = !f.overriddenBy && FIXED_LOCAL.test(f.value);
+    <div className="grid gap-3">
+      {groups.map(({ name, entries }) => {
+        const first = entries[0]!;
         return (
-          <li key={`${f.file}:${f.key}`} className={cn("grid gap-1 px-3 py-2", stale && "bg-red-500/[0.06]", f.overriddenBy && "opacity-70")}>
-            <div className="flex min-w-0 flex-wrap items-center gap-2">
-              <code className={cn("min-w-0 truncate font-mono text-xs font-semibold", f.overriddenBy && "line-through")}>{f.key}</code>
-              <span className="font-mono text-xs text-muted-foreground">{f.file}</span>
-              <span className="ml-auto" />
-              {f.overriddenBy ? (
-                <ToneBadge tone="muted" className="font-normal" title={`Nightshift passes ${f.key} itself (${SOURCES[f.overriddenBy].label}); the framework keeps that value`}>
-                  overridden
+          <div key={name} className="grid gap-1.5">
+            <div className="flex flex-wrap items-center gap-2 text-xs">
+              <code className="font-mono font-semibold">{first.file}</code>
+              {first.standard ? (
+                <ToneBadge tone="muted" className="font-normal" title="Vite, Next.js and Bun load this file themselves, and what Nightshift passes in the environment wins over it">
+                  loaded by the framework
                 </ToneBadge>
-              ) : stale ? (
-                <ToneBadge tone="danger" className="font-normal" title="Not overridden: the app uses this fixed address, which is not this task's app">
-                  fixed address, used as is
+              ) : first.loadedBy.length ? (
+                <ToneBadge tone="warning" className="font-normal" title="Not a file the framework loads by itself. These files mention it, so your config probably loads it, possibly over the environment Nightshift passes.">
+                  used by {first.loadedBy.join(", ")}
                 </ToneBadge>
               ) : (
-                <ToneBadge tone="neutral" className="font-normal">
-                  used as is
+                <ToneBadge tone="neutral" className="font-normal" title="Nothing in the app's folder mentions it; it may be unused">
+                  not loaded by the framework
                 </ToneBadge>
               )}
-              {edit.locked.includes(f.key) ? null : (
-                <span className="-my-1 flex">
-                  <RowAction
-                    label={f.key in edit.own ? `Edit the app's ${f.key}` : `Override ${f.key} for this app`}
-                    icon={f.key in edit.own ? <Pencil /> : <Plus />}
-                    disabled={edit.busy}
-                    onClick={() => edit.start({ id: `file:${f.file}:${f.key}`, key: f.key, value: editValue(f, edit), isNew: false })}
-                  />
-                </span>
-              )}
             </div>
-            <code className="font-mono text-xs break-all">{f.value || <span className="text-muted-foreground">(empty)</span>}</code>
-            {edit.editing?.id === `file:${f.file}:${f.key}` ? edit.editor : null}
-          </li>
+            {!first.standard && first.loadedBy.length ? (
+              <p className="text-xs text-muted-foreground">
+                If {first.loadedBy[0]} copies these values into the environment, they replace what Nightshift passes. Use <Pencil className="inline size-3 align-[-1px]" aria-label="Change in this file" /> to change the value in this file for each task instead.
+              </p>
+            ) : null}
+            <ul className="divide-y rounded-lg border text-sm">
+              {entries.map((f) => {
+                const stale = isStale(f);
+                const id = `file:${f.file}:${f.key}`;
+                const viaEnv = f.standard;
+                return (
+                  <li key={id} className={cn("grid gap-1 px-3 py-2", stale && "bg-red-500/[0.06]")}>
+                    <div className="flex min-w-0 flex-wrap items-center gap-2">
+                      <code className={cn("min-w-0 truncate font-mono text-xs font-semibold", (f.overriddenBy || f.override !== null) && "line-through decoration-muted-foreground/60")}>{f.key}</code>
+                      <span className="ml-auto" />
+                      {f.override !== null ? (
+                        <ToneBadge tone="accent" className="font-normal" title="Nightshift writes its own value into this file in the task's workspace when the app starts">
+                          changed in file
+                        </ToneBadge>
+                      ) : f.overriddenBy ? (
+                        <ToneBadge tone="muted" className="font-normal" title={`Nightshift passes ${f.key} itself (${SOURCES[f.overriddenBy].label}); the framework keeps that value`}>
+                          overridden
+                        </ToneBadge>
+                      ) : stale ? (
+                        <ToneBadge tone="danger" className="font-normal" title="Nothing replaces this fixed address, so the app talks to it instead of this task's app">
+                          fixed address, used as is
+                        </ToneBadge>
+                      ) : (
+                        <ToneBadge tone="neutral" className="font-normal">
+                          used as is
+                        </ToneBadge>
+                      )}
+                      <span className="-my-1 flex">
+                        {viaEnv && f.override === null ? (
+                          edit.locked.includes(f.key) ? null : (
+                            <RowAction
+                              label={f.key in edit.own ? `Edit the app's ${f.key}` : `Override ${f.key} for this app`}
+                              icon={f.key in edit.own ? <Pencil /> : <Plus />}
+                              disabled={edit.busy}
+                              onClick={() => edit.start({ id, key: f.key, value: editValue(f, edit), isNew: false })}
+                            />
+                          )
+                        ) : (
+                          <RowAction
+                            label={f.override !== null ? `Edit what Nightshift writes for ${f.key}` : `Change ${f.key} in this file for each task`}
+                            icon={<Pencil />}
+                            disabled={edit.busy}
+                            onClick={() => {
+                              const value = f.override ?? f.value;
+                              edit.start({ id, key: f.key, value: value.includes(MASK) ? "" : value, isNew: false, file: f.name });
+                            }}
+                          />
+                        )}
+                        {f.override !== null ? <RowAction label={`Stop changing ${f.key} in this file`} icon={<Trash2 />} disabled={edit.busy} onClick={() => edit.remove(f.key, f.name)} /> : null}
+                      </span>
+                    </div>
+                    <code className={cn("font-mono text-xs break-all", f.override !== null && "text-muted-foreground line-through")}>
+                      {f.value || <span className="text-muted-foreground">{f.override !== null ? "(not in the file; added)" : "(empty)"}</span>}
+                    </code>
+                    {f.override !== null ? <code className="font-mono text-xs break-all">→ {f.override || "(empty)"}</code> : null}
+                    {edit.editing?.id === id ? edit.editor : null}
+                  </li>
+                );
+              })}
+            </ul>
+          </div>
         );
       })}
-    </ul>
+    </div>
   );
 }
 
@@ -355,9 +418,9 @@ function ServiceEnvSheet({
 
   const running = data?.running ?? null;
   const previous = running ? new Map(running.map((e) => [e.key, e.value])) : null;
-  const stale = data?.files.filter((f) => !f.overriddenBy && FIXED_LOCAL.test(f.value)) ?? [];
+  const stale = data?.files.filter(isStale) ?? [];
 
-  const change = async (update: { set?: Record<string, string>; remove?: string[] }, done: string) => {
+  const change = async (update: ServiceEnvUpdate, done: string) => {
     setSaving(true);
     setSaveError(null);
     try {
@@ -367,7 +430,7 @@ function ServiceEnvSheet({
       await load();
     } catch (err) {
       const message = messageOf(err);
-      if (update.set) setSaveError(message);
+      if (update.set || update.file?.set) setSaveError(message);
       else toast.error("Could not remove", { description: message });
     } finally {
       setSaving(false);
@@ -388,7 +451,12 @@ function ServiceEnvSheet({
       error={saveError}
       onChange={setEditing}
       onCancel={() => setEditing(null)}
-      onSave={() => void change({ set: { [editing.key]: editing.value } }, `${editing.key} saved for ${label}`)}
+      onSave={() =>
+        void change(
+          editing.file ? { file: { path: editing.file, set: { [editing.key]: editing.value } } } : { set: { [editing.key]: editing.value } },
+          editing.file ? `${editing.key} will be written into ${editing.file}` : `${editing.key} saved for ${label}`,
+        )
+      }
     />
   ) : null;
   const edit: RowEdit = {
@@ -399,7 +467,7 @@ function ServiceEnvSheet({
     busy: saving,
     revealed: reveal,
     start,
-    remove: (key) => void change({ remove: [key] }, `${key} removed from ${label}`),
+    remove: (key, file) => void change(file ? { file: { path: file, remove: [key] } } : { remove: [key] }, file ? `${file} keeps its own ${key} again` : `${key} removed from ${label}`),
   };
 
   return (
@@ -470,9 +538,9 @@ function ServiceEnvSheet({
           ) : null}
           {stale.length ? (
             <Notice tone="danger" title="Fixed local addresses the app still uses">
-              <code className="font-mono">{stale.map((f) => `${f.key} (${f.file})`).join(", ")}</code> {stale.length === 1 ? "points" : "point"} at a fixed localhost address and Nightshift does not override{" "}
-              {stale.length === 1 ? "it" : "them"}, so the app talks to that address instead of this task's app. Use <Plus className="inline size-3.5 align-[-2px]" aria-label="Override" /> on it below to give this app its own value (for example{" "}
-              <code className="font-mono">{"{{api.publicUrl}}"}</code>), or map it under Local files.
+              <code className="font-mono">{stale.map((f) => `${f.key} (${f.file})`).join(", ")}</code> {stale.length === 1 ? "points" : "point"} at a fixed localhost address that nothing replaces, so the app talks to it instead of this task's app.
+              Use the <Pencil className="inline size-3.5 align-[-2px]" aria-label="edit" /> or <Plus className="inline size-3.5 align-[-2px]" aria-label="override" /> button on it below and pick another app's address (for example{" "}
+              <code className="font-mono">{"{{api.publicUrl}}"}</code>).
             </Notice>
           ) : null}
           {data ? (
@@ -492,7 +560,7 @@ function ServiceEnvSheet({
               </section>
               <section className="grid gap-2" aria-label="Variables in .env files">
                 <h3 className="text-sm font-medium">
-                  .env files in the app's folder <span className="font-normal text-muted-foreground">· the framework loads these; what Nightshift passes wins</span>
+                  Env files in the app's folder <span className="font-normal text-muted-foreground">· values as in the repository</span>
                 </h3>
                 <FileTable files={data.files} query={query} edit={edit} />
               </section>

@@ -1623,6 +1623,91 @@ try {
     return `scan found ${paths} (no values exposed) and 2 rewrites; agent: read blocked, cat blocked, told in its prompt; nothing committed; web got NEXT_PUBLIC_API_URL=${seen.api} and its own SECRET; env view shows the rewrite, masks the file's SECRET until revealed, and flags FEATURE_FLAG as changed since start; a variable set from the panel (template filled) overrides the rewrite, PORT/bad names/masked values are refused, removing restores the rewrite; changed .env detected and synced`;
   });
 
+  await check("A committed env file the app loads over the environment can be changed per task without git seeing it, and survives a base merge", async () => {
+    const pin = makeRepos("pinned-");
+    const seed = path.join(root, "pinned-seed2");
+    execFileSync("git", ["clone", "-q", pin.origin, seed]);
+    const put = (rel: string, text: string) => {
+      mkdirSync(path.dirname(path.join(seed, rel)), { recursive: true });
+      writeFileSync(path.join(seed, rel), text);
+    };
+    put("apps/api/server.cjs", "require('node:http').createServer((q, s) => s.end('api')).listen(Number(process.env.PORT), '127.0.0.1');\n");
+    // Like WonderCall's next.config.mjs: copies the file into process.env, replacing what was passed.
+    put(
+      "apps/web/server.cjs",
+      "const fs = require('node:fs'); for (const line of fs.readFileSync('.public.env.local', 'utf8').split('\\n')) { const m = line.match(/^([A-Z_]+)=(.*)$/); if (m) process.env[m[1]] = m[2]; } require('node:http').createServer((q, s) => s.end(JSON.stringify({ api: process.env.API_URL }))).listen(Number(process.env.PORT), '127.0.0.1');\n",
+    );
+    put("apps/web/.public.env.local", "API_URL=http://127.0.0.1:8787\nAPP_URL=http://127.0.0.1:3000\n");
+    sh(seed, "add", ".");
+    sh(seed, "-c", "user.name=seed", "-c", "user.email=seed@local", "commit", "-qm", "pinned");
+    sh(seed, "push", "-q", "origin", "main");
+    sh(pin.repo, "pull", "-q");
+    await post("/api/projects", {
+      name: "Pinned",
+      repo: { path: pin.repo, baseBranch: "main" },
+      gitHost: "local",
+      source: { type: "local" },
+      checks: [],
+      review: false,
+      preview: { command: "node server.cjs", services: [{ name: "api", cwd: "apps/api", command: "node server.cjs" }, { name: "web", cwd: "apps/web", command: "node server.cjs", primary: true }] },
+    });
+    await post("/api/projects/pinned/tasks", { title: "Say hello", body: "Add a hello note." });
+    const r = await waitFor("pinned PR", async () => (await get<{ run: Run | null }>("/api/projects/pinned/tasks/T-1")).run?.prNumber ? (await get<{ run: Run }>("/api/projects/pinned/tasks/T-1")).run : null, 40_000);
+    const W = "/api/projects/pinned/tasks/T-1/workspace";
+    type Svc = { name: string; status: string; url: string | null; port: number | null };
+    const allRunning = (after?: string) =>
+      waitFor("pinned running", async () => {
+        const list = (await get<{ preview: { services: Svc[]; startedAt?: string } }>(W)).preview.services;
+        const web = list.find((x) => x.name === "web")!;
+        return list.every((x) => x.status === "running") && (!after || (web as Svc & { startedAt?: string }).startedAt !== after) ? list : null;
+      }, 20_000);
+    const { request } = await import("node:http");
+    const ask = (url: string) =>
+      new Promise<{ api: string }>((resolve, reject) => {
+        const q = request({ host: "127.0.0.1", port, path: "/", headers: { host: new URL(url).host } }, (res) => {
+          let d = "";
+          res.on("data", (c) => (d += c));
+          res.on("end", () => resolve(JSON.parse(d) as { api: string }));
+        });
+        q.on("error", reject);
+        q.end();
+      });
+    await post(`${W}/preview/start`);
+    let list = await allRunning();
+    const apiUrl = `http://127.0.0.1:${list.find((x) => x.name === "api")!.port}`;
+    if ((await ask(list.find((x) => x.name === "web")!.url!)).api !== "http://127.0.0.1:8787") throw new Error("web did not start with the file's value");
+    type F = { name: string; key: string; value: string; standard: boolean; loadedBy: string[]; override: string | null };
+    const view = await get<{ files: F[] }>(`${W}/preview/env?service=web`);
+    const entry = view.files.find((f) => f.key === "API_URL");
+    if (entry?.name !== ".public.env.local" || entry.standard || entry.loadedBy.join() !== "server.cjs") throw new Error(JSON.stringify(view.files));
+    const putEnv = (update: unknown) => fetch(`${base}${W}/preview/env?service=web`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(update) });
+    const saved = (await (await putEnv({ file: { path: ".public.env.local", set: { API_URL: "{{api.url}}" } } })).json()) as { files: F[]; changed: string[] };
+    if (saved.files.find((f) => f.key === "API_URL")?.override !== "{{api.url}}" || !saved.changed.includes("API_URL (.public.env.local)")) throw new Error(JSON.stringify(saved));
+    const webStart = (list.find((x) => x.name === "web") as Svc & { startedAt?: string }).startedAt;
+    await post(`${W}/preview/restart?service=web`);
+    list = await allRunning(webStart);
+    const after = await ask(list.find((x) => x.name === "web")!.url!);
+    const file = path.join(r.worktree, "apps/web/.public.env.local");
+    const status = sh(r.worktree, "status", "--porcelain");
+    const flag = sh(r.worktree, "ls-files", "-v", "apps/web/.public.env.local").slice(0, 1);
+    if (after.api !== apiUrl || status.trim() || flag !== "S" || !readFileSync(file, "utf8").includes(`API_URL=${apiUrl}`)) throw new Error(JSON.stringify({ after, apiUrl, status, flag }));
+    put("apps/web/.public.env.local", "API_URL=http://127.0.0.1:8787\nAPP_URL=http://127.0.0.1:3000\nNEW_FLAG=1\n");
+    sh(seed, "-c", "user.name=seed", "-c", "user.email=seed@local", "commit", "-qam", "upstream env change");
+    sh(seed, "push", "-q", "origin", "main");
+    const pulled = await post<{ merged?: number; error?: string }>(`${W}/git/pull-base`);
+    const merged = readFileSync(file, "utf8");
+    if (pulled.merged !== 1 || !merged.includes("NEW_FLAG=1") || !merged.includes(`API_URL=${apiUrl}`) || sh(r.worktree, "status", "--porcelain").trim()) throw new Error(JSON.stringify({ pulled, merged }));
+    await putEnv({ file: { path: ".public.env.local", remove: ["API_URL"] } });
+    const webStart2 = (list.find((x) => x.name === "web") as Svc & { startedAt?: string }).startedAt;
+    await post(`${W}/preview/restart?service=web`);
+    list = await allRunning(webStart2);
+    const back = await ask(list.find((x) => x.name === "web")!.url!);
+    const restored = readFileSync(file, "utf8") === sh(r.worktree, "show", "HEAD:apps/web/.public.env.local") && sh(r.worktree, "ls-files", "-v", "apps/web/.public.env.local").startsWith("H");
+    await post(`${W}/preview/stop`);
+    if (back.api !== "http://127.0.0.1:8787" || !restored) throw new Error(JSON.stringify({ back, restored }));
+    return `file found (used by server.cjs); with API_URL={{api.url}} written into .public.env.local web called ${apiUrl}, git status clean (skip-worktree); base merge changing the file went through and kept the value; removing the override restored the committed file`;
+  });
+
   await check("An app that hard-codes port 3000 runs in its own container, so two tasks can preview it at the same time", async () => {
     const hard = makeRepos("hard-");
     const seed = path.join(root, "hard-seed2");

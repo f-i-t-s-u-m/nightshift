@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { readFileSync, rmSync } from "node:fs";
+import { existsSync, readFileSync, rmSync } from "node:fs";
 import path from "node:path";
 import {
   addUsage,
@@ -1035,6 +1035,8 @@ export class Orchestrator {
     const taskIds = [...new Set(runs.map((r) => r.taskId))];
     for (const taskId of taskIds) {
       await this.workspace.previews.stop(id, taskId).catch(() => {});
+      const worktree = runs.find((r) => r.taskId === taskId)?.worktree;
+      if (worktree && existsSync(worktree)) this.workspace.previews.overlays.restore(id, taskId, worktree);
       this.workspace.previews.forget(id, taskId);
       this.workspace.terminals.closeTask(id, taskId);
     }
