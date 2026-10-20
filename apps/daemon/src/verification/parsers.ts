@@ -69,6 +69,8 @@ export function parseNightshiftJson(stdout: string, code: number): ParsedResult 
 const UMBRA_LINE = /^\s*\[([a-z]+)\]\s+(.+?):(\d+|\?)\s+\(([^)]*)\)\s+-\s+(.+)$/i;
 
 export function parseUmbra(stdout: string, stderr: string, code: number): ParsedResult {
+  // Bridges like umbra-server.mjs print Umbra's verdict as Nightshift JSON; read that rather than the CLI's text.
+  if (findingsFromJson(findJson(stdout))) return parseNightshiftJson(stdout, code);
   const text = `${stdout}\n${stderr}`;
   const verdict = text.match(/verdict:\s*(BLOCKED|INCONCLUSIVE|APPROVED)[^\n]*/i);
   if (!verdict) {
@@ -103,6 +105,9 @@ export function parseUmbra(stdout: string, stderr: string, code: number): Parsed
       });
   }
   const outcome = verdict[1].toUpperCase();
+  if (outcome === "BLOCKED" && !findings.some((f) => f.severity === "blocker" || f.severity === "major")) {
+    findings.push({ title: "Umbra blocked this change, but its findings could not be read", detail: tail(stdout, 40), severity: "major" });
+  }
   if (outcome === "INCONCLUSIVE" && !findings.some((f) => f.decision)) {
     findings.push({
       title: "Umbra could not judge every serious claim",

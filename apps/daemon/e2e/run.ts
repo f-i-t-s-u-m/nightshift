@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } 
 import path from "node:path";
 import { LocalPrHost } from "@nightshift/git";
 import { startMockWonderCall } from "@nightshift/wondercall-mock";
-import type { ProjectInspection, Run, RunsResponse, StatusResponse, UsageResponse, VerificationResponse } from "@nightshift/core";
+import type { ProjectInspection, Run, RunsResponse, StatusResponse, TaskViewResponse, UsageResponse, VerificationResponse } from "@nightshift/core";
 
 const here = import.meta.dirname;
 const repoRoot = path.resolve(here, "..", "..", "..");
@@ -872,6 +872,8 @@ try {
   writeFileSync(path.join(qSeed, "check-notes.cjs"), 'const fs = require("node:fs");\nconst missing = !fs.existsSync("NOTES.md");\nconsole.log(JSON.stringify({ summary: missing ? "NOTES.md missing" : "Notes present", findings: missing ? [{ title: "NOTES.md is missing", detail: "Every change needs NOTES.md", severity: "blocker", file: "NOTES.md" }] : [] }));\n');
   writeFileSync(path.join(qSeed, "fake-umbra.cjs"), 'console.log("[umbra gate] review rev_x (lite profile):");\nconsole.log("verdict: APPROVED - may merge");\nconsole.log("score:   none");\nconsole.log("Looks fine.");\nconsole.log("");\nconsole.log("advisory (1) - non-blocking:");\nconsole.log("  [minor] feature.js:2 (generic) - double could use a JSDoc comment");\nconsole.log("\\nawaiting human decision (spec §18).");\n');
   writeFileSync(path.join(qSeed, "fake-umbra-block.cjs"), 'console.log("verdict: BLOCKED - do not merge");\nconsole.log("");\nconsole.log("blocking (1) - must fix before merge:");\nconsole.log("  [major] feature.js:2 (correctness) - double overflows for huge numbers");\nconsole.log("      failure: double(Number.MAX_VALUE) is Infinity");\nconsole.log("");\nconsole.log("UNADJUDICATED (1) - the Ward could not tell; nobody has ruled on these:");\nconsole.log("  [major] feature.js:1 (generic) - value should be configurable");\nconsole.log("");\nconsole.log("awaiting human decision (spec §18).");\n');
+  // What umbra-server.mjs prints: Umbra's verdict as Nightshift JSON (the owner may still pick the "Umbra" format for it).
+  writeFileSync(path.join(qSeed, "fake-umbra-json.cjs"), 'console.log(JSON.stringify({ summary: "verdict: BLOCKED · 1 blocking, 0 advisory, 0 undecided, 0 refuted (Umbra path B on your subscription, run rev_pb_e2e)", findings: [{ title: "double drops the sign of negative zero", detail: "Scenario: double(-0)", severity: "major", file: "feature.js", line: 2 }] }, null, 2));\n');
   sh(qSeed, "add", ".");
   sh(qSeed, "-c", "user.name=seed", "-c", "user.email=seed@local", "commit", "-qm", "quality fixture");
   sh(qSeed, "push", "-q", "origin", "main");
@@ -943,6 +945,32 @@ try {
     const dismissed = await post<{ issue?: { status: string } }>(`/api/projects/quality/tasks/T-1/issues/${blocking.id}`, { status: "dismissed" });
     if (dismissed.issue?.status !== "dismissed") throw new Error("dismiss failed");
     return `blocking (major, feature.js:2) + undecided → decision "${d.question.slice(0, 60)}…" answered "Ignore it"; blocking dismissed by hand`;
+  });
+
+  await check("A manual tester's blocking findings go straight to the agent, also when the Umbra format gets Nightshift JSON", async () => {
+    const idle = async () => {
+      const t = await get<TaskViewResponse>("/api/projects/quality/tasks/T-1");
+      return t.run && ["waiting_ci", "ready_for_review"].includes(t.run.phase) ? t : null;
+    };
+    const before = await waitFor("T-1 waiting on its PR", idle, 60_000);
+    const project = await get<{ project: { testers: unknown[] } }>("/api/projects/quality");
+    const tester = { id: "umbra-json", name: "Umbra JSON", command: "node fake-umbra-json.cjs", format: "umbra", when: "manual", blocking: true, enabled: true };
+    await fetch(`${base}/api/projects/quality`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ testers: [...project.project.testers, tester] }) });
+    await post("/api/projects/quality/tasks/T-1/testers/umbra-json/run");
+    const sent = await waitFor("fix sent to the agent", async () => {
+      const t = await get<TaskViewResponse>("/api/projects/quality/tasks/T-1");
+      return t.events.find((e) => e.message.startsWith("Umbra JSON found 1 blocking issue(s)")) ? t : null;
+    }, 30_000);
+    const v = await get<VerificationResponse>("/api/projects/quality/tasks/T-1/verification");
+    const issue = v.issues.find((i) => i.sourceName === "Umbra JSON");
+    const step = v.steps.filter((x) => x.testerId === "umbra-json").at(-1);
+    if (issue?.severity !== "major" || issue.file !== "feature.js" || step?.status !== "failed" || v.decisions.some((d) => d.status === "open" && d.source === "Umbra JSON")) throw new Error(JSON.stringify({ issue, step, decisions: v.decisions }));
+    const mark = sent.events.find((e) => e.message.startsWith("Umbra JSON found"))!.id;
+    const after = await waitFor("the agent fixed it and T-1 is back on its PR", async () => {
+      const t = await idle();
+      return t?.events.some((e) => e.id > mark && e.type === "phase" && e.message.endsWith("→ fixing")) ? t : null;
+    }, 90_000);
+    return `issue major feature.js:2, step ${step.status} "${step.detail?.slice(0, 40)}…", no decision asked; ${before.run!.phase} → fixing → ${after.run!.phase}`;
   });
 
   await check("Feedback on an open agent PR without a running task creates a task on that branch; the listener can be turned off", async () => {

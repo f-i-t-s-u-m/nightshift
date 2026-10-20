@@ -512,16 +512,18 @@ export class Orchestrator {
       const r = await this.runTester(run, tester);
       if (r.stopped) return;
       const fresh = this.store.getRun(run.id)!;
+      // Undecided findings go to the owner first (their answers carry the blocking issues to the agent); blocking ones go straight to the agent.
       if (r.decisions.length && !isActivePhase(fresh.phase)) await this.pauseForDecisions(fresh);
       else if (r.blocking.length && !isActivePhase(fresh.phase) && !["done", "failed", "stopped"].includes(fresh.phase)) {
-        this.vlog.addDecision(run.id, {
-          kind: "finding",
-          question: `${tester.name} found ${r.blocking.length} blocking issue(s). Send them to the agent to fix?`,
-          context: r.blocking.map((i) => `- ${i.title}`).join("\n"),
-          options: ["Fix them", "Ignore them"],
-          source: tester.name,
+        this.event(run.id, "review", `${tester.name} found ${r.blocking.length} blocking issue(s); sending them to the agent`);
+        const effect = this.resumeAt(fresh, "fixing", {
+          requestId: `${run.id}:tester-fix:${r.blocking.map((b) => b.id.slice(0, 4)).join("")}`,
+          author: "feedback",
+          text: this.issuesPrompt(r.blocking),
+          attachmentIds: [],
         });
-        await this.pauseForDecisions(fresh);
+        if (this.store.getRun(run.id)?.phase === "fixing") this.update(run.id, { activity: `Fixing ${tester.name}'s findings` });
+        else this.event(run.id, "info", effect);
       }
     })().catch((e) => this.log(`tester ${tester.name}: ${String(e)}`));
     return { stepId: null, effect: tester.queue ? `${tester.name} starts on the task's workspace when no other "${tester.queue}" tester runs.` : `${tester.name} is running on the task's workspace.` };

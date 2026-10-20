@@ -147,7 +147,7 @@ Not yet adopted: subagents, child tasks for the orchestrator's own steps, forks 
 - **Steps and rounds**: every agent turn, check run, AI review, external tester run, CI result and push is recorded as a step in a numbered round (round 1 = first attempt; each fix round adds one). Findings from every source become **issues** (source, severity, file:line, round found, round fixed) that are reconciled each round: still present → stays open, gone → fixed. All fix rounds get the same issue-list prompt.
 - **Order after the checks pass**: every-round testers → AI reviewer (JSON findings, at most 2 rounds) → before-PR testers → push. A blocking finding (blocker/major from a blocking source) starts a fix round.
 - **Decisions**: the agent's `ask_question` (now with optional choices), reviewer findings flagged as needing a product decision, Umbra's undecided claims and inconclusive verdicts, and running out of fix rounds all create a **decision**. The task pauses in Needs info and the question is posted on the task. Answering (decision buttons, or any message) resumes the agent with the answers; "ignore"-style answers dismiss the linked issues. Out of fix rounds asks: keep fixing (3 more), open the PR with the open issues, or stop.
-- **External testers** (per project): a command run in the worktree with `NIGHTSHIFT_WORKTREE/BASE/BRANCH/TASK/TASK_ID` (+ `DATABASE_URL`, `PREVIEW_URL`), read in one of three formats: Nightshift JSON, **Umbra** (parses `umbra review`'s verdict, blocking, advisory and UNADJUDICATED sections; Umbra itself is not modified or re-implemented), or exit code. Each runs every round, before the PR, or only manually ("Run now" on the task). Manual runs with blocking results ask whether to send them to the agent.
+- **External testers** (per project): a command run in the worktree with `NIGHTSHIFT_WORKTREE/BASE/BRANCH/TASK/TASK_ID` (+ `DATABASE_URL`, `PREVIEW_URL`), read in one of three formats: Nightshift JSON, **Umbra** (parses `umbra review`'s verdict, blocking, advisory and UNADJUDICATED sections; Umbra itself is not modified or re-implemented), or exit code. Each runs every round, before the PR, or only manually ("Run now" on the task). Manual runs with blocking results ask whether to send them to the agent. (Changed in D36: they go to the agent.)
 - **Listeners** (per project, each switchable): review feedback and failing CI on open PRs from agent branches (`branchPrefix`) that have no running task create a task that continues on the same branch and PR; feedback on PRs with a running task goes to that task. GitHub issues with a label become tasks (GitHub projects). Activity is logged per project. The listener setting is re-read just before creating each task.
 
 ## D18. Nothing that changes the owner's work happens without them (2026-10-18)
@@ -319,3 +319,12 @@ A blocking tester that could not run (command missing, server down, timeout, no 
 - Independent of Blocking: blocking decides whether its findings hold the PR, required decides whether its not running does.
 - Stopping a required tester by hand counts as skipping it this time; pausing or stopping the task ends the pass as before (D34).
 - The Umbra subscription preset is required by default.
+
+## D36. A manual tester's blocking findings go straight to the agent (2026-10-20)
+
+A "Run now" of Umbra's review reported BLOCKED, and nothing was fixed. Two causes: the tester was set to the Umbra format, which reads `umbra review`'s text, while `umbra-server.mjs` prints Nightshift JSON, so no finding was read and the step passed; and even when read, manual runs only asked "Send them to the agent to fix?" (D7). The owner wants the review to trigger the fix.
+
+- A manual run's blocking findings are sent to the agent at once (like PR feedback: the task goes to fixing, then back through the checks and the PR); with no free slot they wait as a message. Undecided findings still come to the owner as decisions first, and their answers carry the blocking issues to the agent. A run that is working, done, failed or stopped is left alone.
+- The Umbra format reads Nightshift JSON when the output is JSON, so either format works for `umbra-server.mjs`.
+- A BLOCKED verdict whose findings cannot be read becomes a blocking issue instead of a pass.
+
