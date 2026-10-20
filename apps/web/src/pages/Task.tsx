@@ -64,7 +64,7 @@ import { Markdown } from "../components/Markdown";
 import { Notice } from "../components/Notice";
 import { ContextMeter, LARGE_CONTEXT, LargeContextHint, NewSessionDialog, SessionsList, contextRatio, useCanStartNew } from "../components/sessions";
 import { EmptyState, Page, PhaseBadge, Spinner, StatusPill, TONE_DOT } from "../components/TaskBits";
-import { projectHref } from "../routing";
+import { projectHref, useNow } from "../routing";
 import { TaskTypeMenu } from "../components/taskTypes";
 import { useDebouncedRefresh, useLive } from "../live";
 import { ChecksTab, DecisionCards, DecisionCount, OriginBadge, attentionCount, openDecisionsOf, useVerification } from "../components/verification";
@@ -295,9 +295,35 @@ function LiveBlock({ stream }: { stream: AgentStreamState }) {
   );
 }
 
+/** While the run waits on its PR: what the watcher saw at its last check, and when it looks again. */
+function WatchStrip({ view }: { view: TaskViewResponse }) {
+  const now = useNow(15_000);
+  const w = view.prWatch;
+  if (!w || !view.run) return null;
+  const next = Math.max(0, Math.round((Date.parse(w.nextAt) - now) / 60_000));
+  return (
+    <div className="flex shrink-0 items-center gap-3 border-t bg-muted/40 px-4 py-2 text-sm" role="status" aria-live="polite">
+      <GitPullRequest className={cn("size-4 shrink-0", w.ok ? "text-muted-foreground" : "text-destructive")} />
+      <div className="min-w-0 flex-1">
+        <div className={cn("truncate", !w.ok && "text-destructive")} title={w.line}>
+          {w.line}
+        </div>
+        <div className="text-xs text-muted-foreground">
+          {view.run.paused ? "Paused: not checking" : (
+            <>
+              Checked <time dateTime={w.checkedAt} title={formatDateTime(w.checkedAt)}>{formatTime(w.checkedAt).slice(0, 5)}</time> · next check {next ? `in about ${next} min` : "soon"}
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function NowStrip({ view }: { view: TaskViewResponse }) {
   const { run, live } = view;
-  if (!run || !isActive(run.phase)) return null;
+  if (run && !isActive(run.phase)) return <WatchStrip view={view} />;
+  if (!run) return null;
   const tool = live?.tool;
   const detail = live?.detail ?? run.activity;
   return (

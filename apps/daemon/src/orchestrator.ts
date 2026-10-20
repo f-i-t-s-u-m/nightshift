@@ -38,7 +38,7 @@ import {
   type GithubRepoInput,
   type MoveToGithubResult,
 } from "@nightshift/core";
-import { LocalPrHost, run as exec, summarizeChecks } from "@nightshift/git";
+import { LocalPrHost, run as exec, summarizeChecks, type PrCheck } from "@nightshift/git";
 import type { RunBridge, RunContext } from "@nightshift/runner-pi";
 import type { Store, StoredMessage } from "@nightshift/store";
 import { applyProjectUpdate, buildContext, seedProjectFromConfig, validateNewProject, type ProjectContext } from "./projects.ts";
@@ -49,7 +49,7 @@ import { WorkspaceService } from "./workspace/service.ts";
 import { SHARED } from "./workspace/preview.ts";
 import { VerificationLog } from "./verification/log.ts";
 import { parseReviewAnswer, parseTesterOutput, type Finding } from "./verification/parsers.ts";
-import { DEFAULT_TRIGGERS, type Decision, type Issue, type TaskOrigin, type TesterConfig, type TriggerConfig, type TriggerEvent } from "@nightshift/core";
+import { DEFAULT_TRIGGERS, type Decision, type PrWatch, type Issue, type TaskOrigin, type TesterConfig, type TriggerConfig, type TriggerEvent } from "@nightshift/core";
 import { SkillsService, skillsSection } from "./skills/service.ts";
 import { syncLocalFiles } from "./workspace/local-files.ts";
 import { diagnoseSetup, lastError, tailLines } from "./workspace/setup-ai.ts";
@@ -2162,10 +2162,33 @@ export class Orchestrator {
     await this.comment(run.id, `pr-link:${run.id}`, `Pull request opened: ${pr.url}`);
   }
 
+  /** Records the PR watcher's check of a run: the latest one for the task view and `nightshift logs -f`, an event only when what it saw changes. */
+  private watchNote(run: Run, line: string, ok = true) {
+    const key = `prWatch:${run.id}`;
+    const before = this.prWatch(run.id);
+    const now = Date.now();
+    this.store.setSetting(key, { checkedAt: new Date(now).toISOString(), nextAt: new Date(now + this.config.intervalsMs.prs).toISOString(), line, ok } satisfies PrWatch);
+    if (before?.line !== line) this.event(run.id, ok ? "pr" : "error", line);
+    const fresh = this.store.getRun(run.id);
+    if (fresh) this.emit({ type: "run", run: fresh });
+  }
+
+  prWatch(runId: string) {
+    return this.store.setting<PrWatch | null>(`prWatch:${runId}`, null);
+  }
+
   private async watchPrs() {
+    const ciLine = (checks: PrCheck[]) => {
+      if (!checks.length) return "no CI checks";
+      const n = { success: 0, failure: 0, pending: 0, neutral: 0 };
+      for (const c of checks) n[c.state] += 1;
+      const parts: Array<[number, string]> = [[n.success, "passed"], [n.failure, "failed"], [n.pending, "pending"], [n.neutral, "skipped"]];
+      return `CI ${parts.filter(([k]) => k).map(([k, w]) => `${k} ${w}`).join(", ")}`;
+    };
     for (const run of this.store.runsInPhases(["waiting_ci", "ready_for_review"])) {
       if (run.paused || !run.prNumber || !this.projects.has(run.projectId)) continue;
       const ctx = this.runCtx(run);
+      const pr = `PR #${run.prNumber}`;
       try {
         const status = await ctx.prHost.status(run.prNumber);
         if (status.state === "merged") {
@@ -2181,7 +2204,10 @@ export class Orchestrator {
           await this.releaseLease(run.id);
           continue;
         }
-        if (status.headSha && run.headSha && status.headSha !== run.headSha) continue;
+        if (status.headSha && run.headSha && status.headSha !== run.headSha) {
+          this.watchNote(run, `${pr}: GitHub shows ${status.headSha.slice(0, 8)}, not the pushed ${run.headSha.slice(0, 8)}; waiting for them to match`);
+          continue;
+        }
         const triggers = this.triggersOf(ctx.project);
         const seen = run.lastCommentSeenAt ?? run.createdAt;
         const reviews = triggers.prFeedback.enabled ? status.reviews.filter((r) => r.submittedAt > seen && (r.state === "CHANGES_REQUESTED" || (r.body ?? "").trim())) : [];
@@ -2209,7 +2235,10 @@ export class Orchestrator {
         }
         if (failing.length || reviews.length || comments.length) {
           const slot = this.freeSlot();
-          if (slot === null) continue;
+          if (slot === null) {
+            this.watchNote(run, `${pr}: ${[failing.length ? `CI failed (${failing.map((f) => f.name).join(", ")})` : "", reviews.length + comments.length ? `${reviews.length + comments.length} new review item(s)` : ""].filter(Boolean).join(" and ")}; waiting for a free agent slot`);
+            continue;
+          }
           if (run.fixRounds >= this.budgets.maxFixRounds) {
             await this.fail(run.id, `Still failing after ${run.fixRounds} fix rounds`);
             continue;
@@ -2227,16 +2256,23 @@ export class Orchestrator {
           continue;
         }
         const pushedAt = this.store.setting<number>(`pushedAt:${run.id}`, 0);
-        if (checkState === "neutral" && Date.now() - pushedAt < this.config.intervalsMs.ciGrace) continue;
+        if (checkState === "neutral" && Date.now() - pushedAt < this.config.intervalsMs.ciGrace) {
+          this.watchNote(run, `${pr}: no CI checks yet; giving CI until ${new Date(pushedAt + this.config.intervalsMs.ciGrace).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false })} to start`);
+          continue;
+        }
+        let waitingFor = run.phase === "waiting_ci" ? "CI" : "human review";
         if (run.phase === "waiting_ci" && (checkState === "success" || checkState === "neutral")) {
           this.event(run.id, "ci", checkState === "success" ? "CI passed" : "No CI checks reported");
           const n = this.store.setting<number>(`pushRound:${run.id}`, 0);
           await this.setTaskStatus(run.id, "ready_for_review", `:${n}`);
           await this.comment(run.id, `ready:${run.id}:${n}`, `Ready for review: ${run.prUrl}`);
           this.update(run.id, { phase: "ready_for_review", activity: "Waiting for human review" });
+          waitingFor = "human review";
         }
+        this.watchNote(run, `${pr}: ${ciLine(status.checks)} · ${triggers.prFeedback.enabled ? "no new review comments" : "PR comments not watched"} · waiting for ${waitingFor}`);
       } catch (error) {
         this.log(`watch PR ${run.id}: ${String(error)}`);
+        this.watchNote(run, `Could not check ${pr}: ${String(error instanceof Error ? error.message : error).split("\n")[0].slice(0, 300)}`, false);
       }
     }
   }
@@ -2561,6 +2597,7 @@ export class Orchestrator {
       runs: runs.map((r) => ({ id: r.id, phase: r.phase, createdAt: r.createdAt, prUrl: r.prUrl })),
       transcript,
       live,
+      prWatch: run && (run.phase === "waiting_ci" || run.phase === "ready_for_review") ? this.prWatch(run.id) : null,
       events: run ? this.store.listEvents(run.id, 300) : [],
       messages,
       attachments: messages.flatMap((m) => m.attachments),

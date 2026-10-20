@@ -81,6 +81,16 @@ export type Run = {
   updatedAt: string;
 };
 
+/** The last check of a run's PR while it waits on CI or review: what Nightshift saw and when it looks again. */
+export type PrWatch = {
+  checkedAt: string;
+  nextAt: string;
+  /** e.g. "PR #12: CI 3 passed, 1 pending · no new review comments · waiting for CI". */
+  line: string;
+  /** False when the check itself failed (e.g. GitHub unreachable). */
+  ok: boolean;
+};
+
 export type RunEventType =
   | "phase"
   | "info"

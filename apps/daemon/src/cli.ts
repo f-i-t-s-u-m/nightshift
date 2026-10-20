@@ -135,10 +135,17 @@ async function main() {
       const id = argv[1];
       if (!id) throw new Error("logs <run-id>");
       let last = 0;
+      let checked = "";
       for (;;) {
         const detail = await api<RunDetailResponse>(API_ROUTES.run(id));
         for (const e of detail.events.filter((e) => e.id > last)) console.log(`${e.at}  ${e.type.padEnd(8)} ${e.message}`);
         last = detail.events.at(-1)?.id ?? last;
+        // While it waits on its PR: each check, even when nothing changed (changes are also events above).
+        const w = detail.prWatch;
+        if (w && w.checkedAt !== checked && (detail.run.phase === "waiting_ci" || detail.run.phase === "ready_for_review")) {
+          checked = w.checkedAt;
+          console.log(`${w.checkedAt}  ${"watch".padEnd(8)} ${w.line} (next check ~${new Date(w.nextAt).toLocaleTimeString()})`);
+        }
         if (!has("f") && !argv.includes("-f")) return;
         await new Promise((r) => setTimeout(r, 2000));
       }

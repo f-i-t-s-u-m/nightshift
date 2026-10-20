@@ -155,6 +155,8 @@ export type TaskViewResponse = {
   runs: Array<Pick<Run, "id" | "phase" | "createdAt" | "prUrl">>;
   transcript: TranscriptItem[];
   live: AgentActivity | null;
+  /** While the run waits on its PR: the watcher's last check. */
+  prWatch: import("./runs.ts").PrWatch | null;
   events: RunEvent[];
   messages: OperatorMessage[];
   attachments: AttachmentRef[];

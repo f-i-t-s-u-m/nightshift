@@ -1,4 +1,4 @@
-import type { ModelUsage, Run, RunEvent, UsageTotals } from "./runs.ts";
+import type { ModelUsage, PrWatch, Run, RunEvent, UsageTotals } from "./runs.ts";
 
 export type SlotView = {
   slot: number;
@@ -27,7 +27,7 @@ export type StatusResponse = {
 
 export type RunsResponse = { runs: Run[] };
 
-export type RunDetailResponse = { run: Run; events: RunEvent[]; modelUsage: ModelUsage };
+export type RunDetailResponse = { run: Run; events: RunEvent[]; modelUsage: ModelUsage; prWatch: PrWatch | null };
 
 export type UsageDay = { day: string; model: string; usage: UsageTotals };
 

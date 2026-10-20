@@ -563,7 +563,7 @@ export function startHttp(options: {
         if (!action && req.method === "GET") {
           const run = store.getRun(id);
           if (!run) return send(res, 404, { error: "not_found" });
-          const body: RunDetailResponse = { run, events: store.listEvents(id), modelUsage: store.runModelUsage(id) };
+          const body: RunDetailResponse = { run, events: store.listEvents(id), modelUsage: store.runModelUsage(id), prWatch: orchestrator.prWatch(id) };
           return send(res, 200, body);
         }
         if (action && req.method === "POST") {
