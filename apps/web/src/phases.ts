@@ -25,7 +25,7 @@ export const isFinal = (phase: RunPhase) => FINAL.includes(phase);
 export const isRetryable = (phase: RunPhase) => phase === "failed" || phase === "stopped";
 
 export type ControlDef = {
-  action: "pause" | "resume" | "stop" | "retry";
+  action: "pause" | "resume" | "stop" | "retry" | "complete";
   label: string;
   enabled: (run: Run) => boolean;
   danger?: boolean;
@@ -36,6 +36,7 @@ export const CONTROLS: readonly ControlDef[] = [
   { action: "resume", label: "Resume", enabled: (r) => r.paused },
   { action: "stop", label: "Stop", enabled: (r) => !isFinal(r.phase), danger: true },
   { action: "retry", label: "Retry", enabled: (r) => isRetryable(r.phase) },
+  { action: "complete", label: "Mark as done", enabled: (r) => r.phase !== "done" },
 ];
 
 export type StatusDef = { status: TaskStatus; label: string; tone: Tone };

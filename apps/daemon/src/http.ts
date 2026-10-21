@@ -556,7 +556,7 @@ export function startHttp(options: {
           return send(res, /not.?found/i.test(message) ? 404 : 400, { error: message });
         }
       }
-      const runMatch = p.match(/^\/api\/runs\/([^/]+)(?:\/(pause|resume|stop|retry))?$/);
+      const runMatch = p.match(/^\/api\/runs\/([^/]+)(?:\/(pause|resume|stop|retry|complete))?$/);
       if (runMatch) {
         const id = decodeURIComponent(runMatch[1]);
         const action = runMatch[2] as ControlAction | undefined;
@@ -568,7 +568,8 @@ export function startHttp(options: {
         }
         if (action && req.method === "POST") {
           try {
-            const run = await orchestrator.control(id, action);
+            const reason = action === "complete" ? (await readJson(req)).reason : undefined;
+            const run = await orchestrator.control(id, action, typeof reason === "string" ? reason : undefined);
             return send(res, 200, { ok: true, run });
           } catch (error) {
             return send(res, 409, { error: error instanceof Error ? error.message : String(error) });

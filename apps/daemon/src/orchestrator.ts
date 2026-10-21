@@ -2516,9 +2516,23 @@ export class Orchestrator {
     await this.releaseLease(runId);
   }
 
-  async control(runId: string, action: "pause" | "resume" | "stop" | "retry"): Promise<Run> {
+  async control(runId: string, action: "pause" | "resume" | "stop" | "retry" | "complete", reason?: string): Promise<Run> {
     const run = this.store.getRun(runId);
     if (!run) throw new Error("run not found");
+    if (action === "complete") {
+      // The owner closes a task Nightshift cannot finish itself (fixed elsewhere, blocked by something outside the
+      // branch, a duplicate). The PR stays open: agents never merge or close PRs (D42).
+      if (run.phase === "done") throw new Error("the task is already done");
+      if (run.conversationId && isActivePhase(run.phase)) await this.runner.abort(run.conversationId).catch(() => {});
+      this.stopTestersOf(runId, "Stopped: the task was marked done");
+      for (const d of this.vlog.openDecisions(runId)) this.vlog.answerDecision(runId, d.id, "Closed: the task was marked done");
+      const why = reason?.trim().slice(0, 2000);
+      const updated = this.update(runId, { phase: "done", paused: false, slot: null, activity: null });
+      await this.comment(runId, `completed:${runId}`, `Marked done by the owner${why ? `: ${why}` : "."}`).catch(() => {});
+      await this.setTaskStatus(runId, "done", ":manual").catch(() => {});
+      await this.releaseLease(runId);
+      return updated;
+    }
     if (action === "pause") {
       if (["done", "failed", "stopped"].includes(run.phase) || run.paused) throw new Error(`cannot pause a ${run.paused ? "paused" : run.phase} run`);
       const updated = this.update(runId, { paused: true, slot: null, activity: "Paused" });

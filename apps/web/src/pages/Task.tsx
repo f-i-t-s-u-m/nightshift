@@ -3,6 +3,7 @@ import {
   ChevronDown,
   ChevronRight,
   CircleAlert,
+  CircleCheck,
   Database,
   ExternalLink,
   FilePen,
@@ -54,6 +55,16 @@ import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { cn } from "@/lib/utils";
@@ -109,7 +120,7 @@ const TOOL_ICONS: Record<string, LucideIcon> = {
 
 const toolIcon = (name: string): LucideIcon => TOOL_ICONS[name] ?? TOOL_ICONS[name.split(/[_.:]/)[0] ?? ""] ?? Wrench;
 
-const CONTROL_ICONS: Record<ControlAction, LucideIcon> = { pause: Pause, resume: Play, stop: Square, retry: RotateCcw };
+const CONTROL_ICONS: Record<ControlAction, LucideIcon> = { pause: Pause, resume: Play, stop: Square, retry: RotateCcw, complete: CircleCheck };
 
 type Outgoing = {
   key: string;
@@ -427,11 +438,14 @@ function PlanCard({ plan, awaiting }: { plan: { text: string; at: string }; awai
 function RunControls({ run, onDone }: { run: Run; onDone: () => Promise<void> }) {
   const [pending, setPending] = useState<ControlAction | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [confirmDone, setConfirmDone] = useState(false);
+  const [reason, setReason] = useState("");
   const control = async (action: ControlAction) => {
     setPending(action);
     setError(null);
     try {
-      await api.control(run.id, action);
+      await api.control(run.id, action, action === "complete" ? reason.trim() : undefined);
+      if (action === "complete") setReason("");
       await onDone();
     } catch (err) {
       setError(`Could not ${action}: ${messageOf(err)}`);
@@ -452,7 +466,7 @@ function RunControls({ run, onDone }: { run: Run; onDone: () => Promise<void> })
             variant={c.danger ? "destructive" : "outline"}
             disabled={pending !== null}
             aria-busy={pending === c.action}
-            onClick={() => void control(c.action)}
+            onClick={() => (c.action === "complete" ? setConfirmDone(true) : void control(c.action))}
           >
             {pending === c.action ? <Spinner className="size-3" /> : <Icon />}
             {c.label}
@@ -464,6 +478,34 @@ function RunControls({ run, onDone }: { run: Run; onDone: () => Promise<void> })
           {error}
         </span>
       ) : null}
+      <AlertDialog open={confirmDone} onOpenChange={setConfirmDone}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Mark this task as done?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Use this when the task is finished or no longer needs Nightshift, for example it was fixed elsewhere or is blocked by something outside this branch. The agent and its testers
+              stop, open decisions close, and the task moves to Done. The pull request stays open and is no longer watched; merge or close it on GitHub yourself.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <div className="grid gap-1.5">
+            <label htmlFor={`done-reason-${run.id}`} className="text-sm font-medium">
+              Why (optional)
+            </label>
+            <Textarea
+              id={`done-reason-${run.id}`}
+              value={reason}
+              onChange={(e) => setReason(e.target.value)}
+              placeholder="e.g. The CI failure comes from main and is fixed in PR #1300"
+              rows={3}
+            />
+            <p className="text-xs text-muted-foreground">Posted as a comment on the task.</p>
+          </div>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={() => void control("complete")}>Mark as done</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

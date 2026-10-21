@@ -369,3 +369,10 @@ The PR triggers (`watchAgentPrs`) made a new task for any open `nightshift/` PR 
 
 - A PR that any task has worked on (same branch or PR number) stays with that task, whatever its phase. When that task failed or was stopped, the triggers log once that the PR belongs to it (the first task on the PR) and that a message to it continues the work.
 - Triggers only make tasks for PRs no task owns (e.g. a branch pushed outside a run, or a run history that was lost), and use the same filters as runs: CI checks that also fail on the PR's base branch (D39) and commands, answers to commands and Nightshift's own comments (D40) do not count.
+
+## D42. The owner can mark a task done (2026-10-21)
+
+Some tasks cannot be finished by Nightshift: the CI failure comes from another branch, the change landed elsewhere, or the task is a duplicate (T-4 to T-11 from D41). They stayed Failed with no way to close them.
+
+- **Mark as done** on the task (any phase except done; `POST /api/runs/:id/complete` with an optional `reason`): asks for confirmation and an optional reason, stops the agent and its testers, closes open decisions ("Closed: the task was marked done"), posts "Marked done by the owner: <reason>" on the task, sets the task's status to Done in its source (for WonderCall that is a status change there, keyed so a retry does it once), releases the lease, and ends the run as done (previews stop, the task database is dropped, terminals close; the worktree and branch stay).
+- The pull request stays open and is no longer watched: agents never merge or close PRs, so the owner merges or closes it on GitHub. A PR whose task is done is not picked up by the triggers (D41).

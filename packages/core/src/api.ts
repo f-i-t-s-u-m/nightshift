@@ -39,7 +39,7 @@ export type UsageResponse = {
   byModel: ModelUsage;
 };
 
-export type ControlAction = "pause" | "resume" | "stop" | "retry";
+export type ControlAction = "pause" | "resume" | "stop" | "retry" | "complete";
 
 export type ServerEvent =
   | { type: "status"; status: StatusResponse }

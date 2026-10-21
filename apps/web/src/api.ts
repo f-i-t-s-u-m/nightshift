@@ -150,7 +150,7 @@ export const api = {
   runs: () => request<RunsResponse>(ROUTES.runs),
   run: (id: string) => request<RunDetailResponse>(ROUTES.run(id)),
   usage: () => request<UsageResponse>(ROUTES.usage),
-  control: (id: string, action: ControlAction) => post<{ ok: true }>(ROUTES.control(id, action)),
+  control: (id: string, action: ControlAction, reason?: string) => post<{ ok: true }>(ROUTES.control(id, action), reason === undefined ? undefined : { reason }),
   killSwitch: (on: boolean) => post<{ killSwitch: boolean }>(ROUTES.killSwitch, { on }),
   projects: () => request<ProjectsResponse>(ROUTES.projects),
   createProject: (input: NewProjectInput) => post<{ project: ProjectSummary }>(ROUTES.projects, input),
