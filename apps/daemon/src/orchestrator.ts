@@ -1317,6 +1317,8 @@ export class Orchestrator {
           leaseExpiresAt: lease.expiresAt,
           phase: "claimed",
         });
+        // A run that continues the previous run's branch continues its pull request too, or the push asks to open a new one.
+        if (latest?.prNumber && latest.branch === branch) this.update(run.id, { prNumber: latest.prNumber, prUrl: latest.prUrl });
         this.leases.set(run.id, lease);
         this.event(run.id, "info", `Claimed ${task.id}: ${task.title}`);
         this.emit({ type: "run", run });
@@ -2101,6 +2103,15 @@ export class Orchestrator {
 
   private async pushApproved(run: Run): Promise<boolean> {
     const ws = this.runCtx(run).workspaces;
+    if (!run.prNumber) {
+      const open = await this.runCtx(run)
+        .prHost.findOpen(run.branch)
+        .catch(() => null);
+      if (open) {
+        run = this.update(run.id, { prNumber: open.number, prUrl: open.url });
+        this.event(run.id, "pr", `Continuing the open PR #${open.number}`, { url: open.url });
+      }
+    }
     await this.commitWork(run);
     if ((await ws.aheadOfBase(run.worktree, this.baseOf(run))) === 0) throw new Error("The agent finished without changing any files");
     const head = (await exec("git", ["rev-parse", "HEAD"], { cwd: run.worktree })).stdout.trim();

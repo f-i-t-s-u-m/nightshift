@@ -328,3 +328,19 @@ A "Run now" of Umbra's review reported BLOCKED, and nothing was fixed. Two cause
 - The Umbra format reads Nightshift JSON when the output is JSON, so either format works for `umbra-server.mjs`.
 - A BLOCKED verdict whose findings cannot be read becomes a blocking issue instead of a pass.
 
+
+## D37. Nightshift stops runaway processes, whatever the project's scripts do (2026-10-21)
+
+A WonderCall package had `"lint": "turbo lint"`: inside that package turbo runs the package's own `lint`, which runs turbo again, forever. Checks and the agent's `bun run lint` left the chain running after the top-level lint exited; it reached ~1,200 turbo processes (~185 GB) and crashed the Mac twice. Imported projects cannot all be fixed, so the guard lives in Nightshift.
+
+- **Process guard** (`apps/daemon/src/process-guard.ts`), started with the daemon: once a second it reads the process table and follows every process the daemon started (agent commands, checks, testers, setup, previews, terminals). A process is remembered once seen, so a tree stays watched after launchd adopts it; an orphan whose working directory is inside the data folder (the task worktrees) is adopted too, for commands that background a script and exit.
+- A tree is frozen (SIGSTOP, so it cannot spawn between the scan and the kill) and killed when the same command runs inside itself 5 levels deep (a script that calls itself; caught in about a second), when it runs more than 800 processes, or when it holds more than 40% of the machine's memory. It is logged and shown as an error event on the task whose worktree it ran in.
+- **Checks** run with `group: true`: after the command exits, everything it started is killed, including tasks turbo moved to their own process group, and the check stops above 500 processes.
+- Not covered: processes inside Docker containers (the Docker VM caps their memory) and processes the owner starts outside Nightshift.
+
+## D38. A new run of a task keeps its pull request (2026-10-21)
+
+A message on a failed task starts a new run on the same branch, but the run did not carry the PR number, so the push asked "Push 0 commits and open the pull request?" for a branch that already had PR #1294.
+
+- A run that continues the previous run's branch takes over its PR number and URL.
+- Before asking to push, a run with no PR looks for an open PR on its branch and continues it ("Continuing the open PR #n"), so a PR opened by hand or lost from the run is used too.

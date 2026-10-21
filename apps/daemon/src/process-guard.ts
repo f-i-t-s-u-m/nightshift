@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { readlinkSync } from "node:fs";
+import { existsSync, readlinkSync } from "node:fs";
 import { totalmem } from "node:os";
 import { killTree } from "@nightshift/git";
 
@@ -36,28 +36,51 @@ function processTable(): Promise<Proc[] | null> {
   );
 }
 
-function cwdOf(pid: number): Promise<string | null> {
-  try {
-    return Promise.resolve(readlinkSync(`/proc/${pid}/cwd`));
-  } catch {}
+/** Working directory of each pid that has one readable. */
+function cwdsOf(pids: number[]): Promise<Map<number, string>> {
+  const out = new Map<number, string>();
+  if (!pids.length) return Promise.resolve(out);
+  if (existsSync("/proc/self/cwd")) {
+    for (const pid of pids) {
+      try {
+        out.set(pid, readlinkSync(`/proc/${pid}/cwd`));
+      } catch {}
+    }
+    return Promise.resolve(out);
+  }
   return new Promise((resolve) =>
-    execFile("lsof", ["-a", "-p", String(pid), "-d", "cwd", "-Fn"], (err, out) => {
-      const line = err ? undefined : out.split("\n").find((l) => l.startsWith("n"));
-      resolve(line ? line.slice(1) : null);
+    execFile("lsof", ["-a", "-d", "cwd", "-p", pids.join(","), "-Fpn"], { maxBuffer: 16 << 20 }, (_err, stdout) => {
+      let pid = 0;
+      for (const line of (stdout ?? "").split("\n")) {
+        if (line.startsWith("p")) pid = Number(line.slice(1));
+        else if (line.startsWith("n") && pid) out.set(pid, line.slice(1));
+      }
+      resolve(out);
     }),
   );
 }
 
 export class ProcessGuard {
   private readonly tracked = new Set<number>();
+  /** Orphans (adopted by launchd) whose working directory was already looked at. */
+  private readonly classified = new Set<number>();
   private timer: NodeJS.Timeout | undefined;
   private busy = false;
 
+  /**
+   * `ownedDirs`: an orphan working inside one of these is Nightshift's even if it lost its parent before it was seen
+   * (a command that backgrounds a script and exits).
+   */
   constructor(
     private readonly onRunaway: (runaway: Runaway) => void,
+    private readonly ownedDirs: string[] = [],
     private readonly root = process.pid,
     private readonly intervalMs = 1000,
   ) {}
+
+  private owns(dir: string) {
+    return this.ownedDirs.some((d) => dir === d || dir.startsWith(`${d}/`));
+  }
 
   start() {
     this.timer = setInterval(() => void this.tick(), this.intervalMs);
@@ -84,6 +107,12 @@ export class ProcessGuard {
     const children = new Map<number, number[]>();
     for (const p of procs) children.set(p.ppid, [...(children.get(p.ppid) ?? []), p.pid]);
     for (const pid of this.tracked) if (!byPid.has(pid)) this.tracked.delete(pid);
+    for (const pid of this.classified) if (!byPid.has(pid)) this.classified.delete(pid);
+    if (this.ownedDirs.length) {
+      const orphans = procs.filter((p) => p.ppid === 1 && !this.tracked.has(p.pid) && !this.classified.has(p.pid)).map((p) => p.pid);
+      for (const pid of orphans) this.classified.add(pid);
+      for (const [pid, cwd] of await cwdsOf(orphans)) if (this.owns(cwd)) this.tracked.add(pid);
+    }
     const queue = [this.root, ...this.tracked];
     while (queue.length) {
       for (const child of children.get(queue.pop()!) ?? []) {
@@ -123,7 +152,7 @@ export class ProcessGuard {
       const proc = byPid.get(pid);
       if (!proc || !this.tracked.has(pid)) continue;
       const { processes, memoryBytes } = this.measure(pid, byPid, children);
-      const cwd = await cwdOf(pid);
+      const cwd = (await cwdsOf([pid])).get(pid) ?? null;
       await killTree(new Set([pid]));
       for (const gone of this.subtree(pid, children)) this.tracked.delete(gone);
       this.onRunaway({ pid, command: proc.command, cwd, processes, memoryBytes, reason });

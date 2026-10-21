@@ -1,4 +1,4 @@
-import { appendFileSync, mkdirSync } from "node:fs";
+import { appendFileSync, mkdirSync, realpathSync } from "node:fs";
 import type { Server } from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -100,7 +100,7 @@ export async function startDaemon(config: NightshiftConfig, options: { webDir?: 
       const rel = r.cwd === run.worktree ? "" : ` (in ${path.relative(run.worktree!, r.cwd!)})`;
       orchestrator.event(run.id, "error", `Nightshift stopped a runaway command${rel}: \`${r.command.slice(0, 200)}\`. Reason: ${r.reason}. ${r.processes} processes were killed. Fix the script in the repository; running it again will be stopped again.`);
     }
-  });
+  }, [realpathSync(config.dataDir)]);
   guard.start();
   const reapedPreviews = orchestrator.workspace.previews.reapLeftovers();
   if (reapedPreviews.length) log(`Stopped ${reapedPreviews.length} leftover preview server(s)`);
