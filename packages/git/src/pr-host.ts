@@ -6,7 +6,8 @@ export type PrCheck = { name: string; state: CheckState; detailsUrl?: string; su
 
 export type PrReview = { id: string; author: string; state: string; body: string; submittedAt: string };
 
-export type PrComment = { id: string; author: string; body: string; createdAt: string; path?: string; line?: number };
+/** `replyTo`: the id of the comment this one answers in an inline review thread. */
+export type PrComment = { id: string; author: string; body: string; createdAt: string; path?: string; line?: number; replyTo?: string };
 
 export type PrStatus = {
   state: "open" | "merged" | "closed";
@@ -25,6 +26,8 @@ export interface PrHost {
   create(input: { branch: string; base: string; title: string; body: string }): Promise<PrInfo>;
   status(number: number): Promise<PrStatus>;
   failureLog(check: PrCheck): Promise<string | null>;
+  /** The latest finished result of each check on the base branch's recent commits, to tell failures a PR caused from ones already there. */
+  baseChecks?(branch: string): Promise<PrCheck[]>;
 }
 
 export function summarizeChecks(checks: PrCheck[]): CheckState {

@@ -344,3 +344,13 @@ A message on a failed task starts a new run on the same branch, but the run did 
 
 - A run that continues the previous run's branch takes over its PR number and URL.
 - Before asking to push, a run with no PR looks for an open PR on its branch and continues it ("Continuing the open PR #n"), so a PR opened by hand or lost from the run is used too.
+
+## D39. CI failures and review findings that are not this branch's do not fail the task (2026-10-21)
+
+W-5087 and W-6075 failed with "CI still fails … a human needs to look": the failing check (`Errors are values and types are honest`) also failed on `main`, so the agent rightly changed nothing, and the next look at CI failed the task. Review bots also repeat findings that are already fixed (Greptile answered a retest of a fixed migration with "the finding still applies"), and every repeat started another fix round.
+
+- **Fails on the base branch too**: before a CI failure goes to the agent, Nightshift reads the latest finished result of each check on the base branch's last 5 commits (`PrHost.baseChecks`, cached per head commit). A check failing there is not sent to the agent and does not hold the task.
+- **The agent can report what is not its to fix** (`report_not_caused_here`): a failing check this branch did not cause (e.g. from another pull request), or a review finding already fixed in the current code or not applying, each with its evidence. The feedback message lists review comments with ids for this. The reasons go on the task as a comment, so the reviewer can send it back.
+- Such checks are shown as "not caused by this change" (minor, not blocker), commented on the task once per commit, and CI counts as passed without them: the task goes to Ready for review. If the agent neither fixes nor reports a failing check, the task still fails as before.
+- **Stale repeats**: an inline finding is identified by its file and title, a reply by its thread's first comment. Once reported as fixed or not applying, a repeat by anyone but the owner (`gh` login) is not sent to the agent; the task shows "Not sent to the agent: n repeated finding(s) …". The owner's own comments always go through.
+- Still open: Nightshift does not ask the bot to re-review (e.g. "@greptile-apps retest"); posting on the PR for a bot is a new outward side effect, left for later.

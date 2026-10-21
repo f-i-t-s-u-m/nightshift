@@ -78,8 +78,8 @@ export class GithubPrHost implements PrHost {
     const inline = await run("gh", ["api", `repos/{owner}/{repo}/pulls/${number}/comments`, "--paginate"], { cwd: this.repoPath });
     const inlineComments =
       inline.code === 0
-        ? (JSON.parse(inline.stdout || "[]") as Array<{ id: number; user: { login: string }; body: string; created_at: string; path: string; line?: number }>).map(
-            (c) => ({ id: `inline-${c.id}`, author: c.user.login, body: c.body, createdAt: c.created_at, path: c.path, line: c.line }),
+        ? (JSON.parse(inline.stdout || "[]") as Array<{ id: number; user: { login: string }; body: string; created_at: string; path: string; line?: number; in_reply_to_id?: number }>).map(
+            (c) => ({ id: `inline-${c.id}`, author: c.user.login, body: c.body, createdAt: c.created_at, path: c.path, line: c.line, ...(c.in_reply_to_id ? { replyTo: `inline-${c.in_reply_to_id}` } : {}) }),
           )
         : [];
     const state = pr.state.toUpperCase();
@@ -132,6 +132,26 @@ export class GithubPrHost implements PrHost {
       return failed.stdout || res.stderr;
     }
     return res.stdout.split("\n").slice(-3000).join("\n");
+  }
+
+  async baseChecks(branch: string): Promise<PrCheck[]> {
+    const shas = JSON.parse(await this.gh(["api", `repos/{owner}/{repo}/commits?sha=${branch}&per_page=5`, "--jq", "[.[].sha]"])) as string[];
+    const latest = new Map<string, PrCheck>();
+    for (const sha of shas) {
+      const runs = JSON.parse(await this.gh(["api", `repos/{owner}/{repo}/commits/${sha}/check-runs?per_page=100`, "--jq", "[.check_runs[] | {name, status, conclusion, started_at, html_url}]"])) as Array<{
+        name: string;
+        status: string;
+        conclusion: string | null;
+        started_at: string | null;
+        html_url: string;
+      }>;
+      const statuses = JSON.parse(await this.gh(["api", `repos/{owner}/{repo}/commits/${sha}/status`, "--jq", "[.statuses[] | {context, state, target_url}]"])) as Array<{ context: string; state: string; target_url: string | null }>;
+      const here = new Map<string, PrCheck>();
+      for (const r of runs.sort((a, b) => (a.started_at ?? "").localeCompare(b.started_at ?? ""))) here.set(r.name, { name: r.name, state: checkState({ status: r.status, conclusion: r.conclusion ?? undefined }), detailsUrl: r.html_url });
+      for (const st of statuses) here.set(st.context, { name: st.context, state: checkState({ __typename: "StatusContext", state: st.state }), detailsUrl: st.target_url ?? undefined });
+      for (const [name, check] of here) if (check.state !== "pending" && !latest.has(name)) latest.set(name, check);
+    }
+    return [...latest.values()];
   }
 
   async failureLog(check: PrCheck): Promise<string | null> {

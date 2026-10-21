@@ -11,6 +11,7 @@ export interface RunBridge {
   postComment(run: RunContext, body: string, idempotencyKey: string): Promise<void>;
   askQuestion(run: RunContext, question: string, idempotencyKey: string, options?: string[]): Promise<void>;
   checks(run: RunContext): CheckConfig[];
+  reportNotCausedHere(run: RunContext, input: { ci?: Array<{ check: string; reason: string }>; feedback?: Array<{ id: string; reason: string }> }, idempotencyKey: string): Promise<string>;
   submitPlan(run: RunContext, plan: string, idempotencyKey: string): Promise<void>;
   preview(run: RunContext, action: "start" | "restart" | "stop" | "status", probe?: string, service?: string): Promise<string>;
   database(run: RunContext, action: "info" | "reset"): Promise<string>;
@@ -127,6 +128,21 @@ export function createTaskToolsExtension(bridge: RunBridge) {
     },
   });
 
+  const reportNotCausedHere = defineTool({
+    name: "report_not_caused_here",
+    description:
+      "Report PR feedback that is not yours to fix in this branch, instead of changing code for it: a failing CI check this branch did not cause (it fails without your change, or the failing code is not in your diff, e.g. it comes from the base branch or another pull request), or a review finding that is already fixed in the current code or does not apply (review bots repeat stale findings). Verify each one first: compare with the base branch, read the current code. Give the evidence in the reason. Nightshift then stops holding the task on it and tells the reviewer why. Never use it for something you could fix.",
+    parameters: Type.Object({
+      ci: Type.Optional(Type.Array(Type.Object({ check: Type.String({ description: "The failing check's name, as in the feedback message" }), reason: Type.String() }))),
+      feedback: Type.Optional(Type.Array(Type.Object({ id: Type.String({ description: "The review comment id in brackets from the feedback message" }), reason: Type.String() }))),
+    }),
+    replay: "safe",
+    execute: async (args, api) => {
+      const a = api as unknown as Api;
+      return text(await bridge.reportNotCausedHere(ctxOf(a), args, `not-caused-here:${a.conversationId}:${a.callId}`));
+    },
+  });
+
   const preview = defineTool({
     name: "preview",
     description:
@@ -162,5 +178,5 @@ export function createTaskToolsExtension(bridge: RunBridge) {
     return run ? bridge.localFilesNote(run) : undefined;
   });
 
-  return defineExtension({ name: "nightshift-task", tools: [getTask, listComments, postComment, askQuestion, runChecks, preview, database], sections: [taskType, skills, localFiles] });
+  return defineExtension({ name: "nightshift-task", tools: [getTask, listComments, postComment, askQuestion, runChecks, reportNotCausedHere, preview, database], sections: [taskType, skills, localFiles] });
 }

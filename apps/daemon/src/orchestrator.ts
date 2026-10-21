@@ -38,7 +38,7 @@ import {
   type GithubRepoInput,
   type MoveToGithubResult,
 } from "@nightshift/core";
-import { LocalPrHost, run as exec, summarizeChecks, type PrCheck } from "@nightshift/git";
+import { LocalPrHost, run as exec, summarizeChecks, type PrCheck, type PrComment } from "@nightshift/git";
 import type { RunBridge, RunContext } from "@nightshift/runner-pi";
 import type { Store, StoredMessage } from "@nightshift/store";
 import { applyProjectUpdate, buildContext, seedProjectFromConfig, validateNewProject, type ProjectContext } from "./projects.ts";
@@ -53,7 +53,8 @@ import { DEFAULT_TRIGGERS, type Decision, type PrWatch, type Issue, type TaskOri
 import { SkillsService, skillsSection } from "./skills/service.ts";
 import { syncLocalFiles } from "./workspace/local-files.ts";
 import { diagnoseSetup, lastError, tailLines } from "./workspace/setup-ai.ts";
-import { commitAuthor } from "./identity.ts";
+import { commitAuthor, githubLogin } from "./identity.ts";
+import { finding } from "./verification/stale.ts";
 import { createRepo, ensureReady, GithubError, pushHint, pushUrl, repoUrls, setDefaultBranch, tail, validateRepoInput } from "./github.ts";
 import { answerPrompt, feedbackPrompt, instructions, localChecksPrompt, operatorNotes, prBody, taskPrompt } from "./prompts.ts";
 
@@ -847,6 +848,40 @@ export class Orchestrator {
       this.event(rc.runId, "question", question);
     },
     checks: (rc) => this.ctx(rc.projectId).project.checks,
+    reportNotCausedHere: async (rc, input, key) => {
+      const lines: string[] = [];
+      const unknown: string[] = [];
+      if (input.ci?.length) {
+        const claims = this.store.setting<Record<string, { reason: string }>>(`unrelatedCi:${rc.runId}`, {});
+        for (const c of input.ci) {
+          claims[c.check] = { reason: c.reason };
+          this.vlog.reconcile(rc.runId, "ci", c.check, [{ title: `${c.check} fails on CI, not caused by this change`, detail: c.reason, severity: "minor" }]);
+          lines.push(`- CI check ${c.check}: ${c.reason}`);
+        }
+        this.store.setSetting(`unrelatedCi:${rc.runId}`, claims);
+      }
+      const sent = this.store.setting<Record<string, { key: string; title: string }>>(`sentFindings:${rc.runId}`, {});
+      if (input.feedback?.length) {
+        const dismissed = this.store.setting<Record<string, { title: string; reason: string }>>(`staleFindings:${rc.runId}`, {});
+        for (const f of input.feedback) {
+          const finding = sent[f.id];
+          if (!finding) {
+            unknown.push(f.id);
+            continue;
+          }
+          dismissed[finding.key] = { title: finding.title, reason: f.reason };
+          lines.push(`- Review finding "${finding.title}": ${f.reason}`);
+        }
+        this.store.setSetting(`staleFindings:${rc.runId}`, dismissed);
+      }
+      if (lines.length) {
+        const body = `Not fixed in this branch, and why (send it back to the agent if you disagree):\n${lines.join("\n")}`;
+        await this.sideEffect(key, rc.runId, () => this.ctx(rc.projectId).source.comment(rc.taskId, body, key));
+        this.event(rc.runId, "comment", body);
+      }
+      const recorded = `Recorded ${lines.length} item(s); Nightshift will not hold the task or send them to you again.`;
+      return unknown.length ? `${recorded} Unknown feedback id(s): ${unknown.join(", ")}. Use the ids in brackets from the feedback message${Object.keys(sent).length ? ` (${Object.keys(sent).join(", ")})` : ""}.` : recorded;
+    },
     submitPlan: async (rc, plan, key) => {
       this.store.setSetting(`plan:${rc.runId}`, plan);
       this.event(rc.runId, "plan", plan);
@@ -2175,6 +2210,49 @@ export class Orchestrator {
     await this.comment(run.id, `pr-link:${run.id}`, `Pull request opened: ${pr.url}`);
   }
 
+  /** Failing CI checks this PR did not cause, with why: the check fails on the base branch too, or the agent reported it comes from elsewhere (D39). */
+  private async notCausedHere(run: Run, ctx: ProjectContext, failing: PrCheck[], headSha: string | null): Promise<Map<string, string>> {
+    const out = new Map<string, string>();
+    const claims = this.store.setting<Record<string, { reason: string }>>(`unrelatedCi:${run.id}`, {});
+    for (const c of failing) if (claims[c.name]) out.set(c.name, `the agent found it is not caused by this change: ${claims[c.name].reason}`);
+    if (!ctx.prHost.baseChecks || out.size === failing.length) return out;
+    const base = this.baseOf(run);
+    const key = `baseCi:${run.id}:${headSha}`;
+    let failingOnBase = this.store.setting<string[] | null>(key, null);
+    if (!failingOnBase) {
+      const checks = await ctx.prHost.baseChecks(base).catch(() => null);
+      if (!checks) return out;
+      failingOnBase = checks.filter((c) => c.state === "failure").map((c) => c.name);
+      this.store.setSetting(key, failingOnBase);
+    }
+    for (const c of failing) if (!out.has(c.name) && failingOnBase.includes(c.name)) out.set(c.name, `it fails on ${base} too`);
+    return out;
+  }
+
+  /** New PR comments without the inline findings the agent already showed are fixed or do not apply, which bots repeat; the owner's own comments always go through (D39). */
+  private withoutStaleFindings(run: Run, fresh: PrComment[], all: PrComment[]) {
+    const dismissed = this.store.setting<Record<string, { title: string; reason: string }>>(`staleFindings:${run.id}`, {});
+    const owner = githubLogin();
+    const comments: PrComment[] = [];
+    const repeated: string[] = [];
+    for (const c of fresh) {
+      const key = c.author === owner ? null : finding(c, all)?.key;
+      if (key && dismissed[key]) repeated.push(dismissed[key].title);
+      else comments.push(c);
+    }
+    return { comments, repeated };
+  }
+
+  /** The inline findings sent to the agent, by comment id, so it can report one as already fixed. */
+  private rememberFindings(run: Run, comments: PrComment[], all: PrComment[]) {
+    const sent = this.store.setting<Record<string, { key: string; title: string }>>(`sentFindings:${run.id}`, {});
+    for (const c of comments) {
+      const f = finding(c, all);
+      if (f) sent[c.id] = f;
+    }
+    this.store.setSetting(`sentFindings:${run.id}`, sent);
+  }
+
   /** Records the PR watcher's check of a run: the latest one for the task view and `nightshift logs -f`, an event only when what it saw changes. */
   private watchNote(run: Run, line: string, ok = true) {
     const key = `prWatch:${run.id}`;
@@ -2224,15 +2302,19 @@ export class Orchestrator {
         const triggers = this.triggersOf(ctx.project);
         const seen = run.lastCommentSeenAt ?? run.createdAt;
         const reviews = triggers.prFeedback.enabled ? status.reviews.filter((r) => r.submittedAt > seen && (r.state === "CHANGES_REQUESTED" || (r.body ?? "").trim())) : [];
-        const comments = triggers.prFeedback.enabled ? status.comments.filter((c) => c.createdAt > seen) : [];
+        const fresh = triggers.prFeedback.enabled ? status.comments.filter((c) => c.createdAt > seen) : [];
+        const { comments, repeated } = this.withoutStaleFindings(run, fresh, status.comments);
         const checkState = summarizeChecks(status.checks);
         const failing = checkState === "failure" && triggers.ciFailures.enabled ? status.checks.filter((c) => c.state === "failure") : [];
+        const known = failing.length ? await this.notCausedHere(run, ctx, failing, status.headSha) : new Map<string, string>();
+        const blocking = failing.filter((c) => !known.has(c.name));
+        const ownState = summarizeChecks(status.checks.filter((c) => !known.has(c.name)));
         const ciKey = `ciState:${run.id}:${status.headSha}`;
         if (checkState !== "pending" && checkState !== "neutral" && this.store.setting<string | null>(ciKey, null) !== checkState) {
           this.store.setSetting(ciKey, checkState);
           const step = this.vlog.startStep(run.id, "ci", `CI on ${status.headSha?.slice(0, 8) ?? "the PR"}`);
           const ciIssues: Issue[] = [];
-          for (const c of status.checks) ciIssues.push(...this.vlog.reconcile(run.id, "ci", c.name, c.state === "failure" ? [{ title: `${c.name} fails on CI`, detail: c.summary ?? c.detailsUrl ?? "", severity: "blocker" }] : []));
+          for (const c of status.checks) ciIssues.push(...this.vlog.reconcile(run.id, "ci", c.name, c.state === "failure" ? [known.has(c.name) ? { title: `${c.name} fails on CI, not caused by this change`, detail: known.get(c.name)!, severity: "minor" } : { title: `${c.name} fails on CI`, detail: c.summary ?? c.detailsUrl ?? "", severity: "blocker" }] : []));
           this.vlog.finishStep(run.id, step, checkState === "failure" ? "failed" : "passed", {
             detail: status.checks.map((c) => `${c.name}: ${c.state}`).join(", "),
             issueIds: ciIssues.map((i) => i.id),
@@ -2241,32 +2323,44 @@ export class Orchestrator {
         for (const r of reviews) this.vlog.reconcile(run.id, "pr-comment", `Review ${r.id}`, [{ title: (r.body || r.state).split("\n")[0].slice(0, 200), detail: `${r.author}: ${r.body || r.state}`, severity: "major" }]);
         for (const c of comments) this.vlog.reconcile(run.id, "pr-comment", `Comment ${c.id}`, [{ title: c.body.split("\n")[0].slice(0, 200), detail: `${c.author}${c.path ? ` on ${c.path}${c.line ? `:${c.line}` : ""}` : ""}: ${c.body}`, severity: "major", ...(c.path ? { file: c.path } : {}), ...(c.line ? { line: c.line } : {}) }]);
         if ((reviews.length || comments.length) && run.prNumber) this.triggerEvent(ctx.project.id, { kind: "pr-feedback", ref: `PR #${run.prNumber}`, url: run.prUrl ?? undefined, taskId: run.taskId, note: `${reviews.length + comments.length} new review item(s) sent to the running task` });
+        const knownKey = `ci-known:${run.id}:${status.headSha}:${[...known.keys()].sort().join(",")}`;
+        if (known.size && status.headSha && !this.store.setting(knownKey, false)) {
+          await this.comment(run.id, knownKey, `CI fails on checks this change did not cause, so they do not hold the task:\n${[...known].map(([n, why]) => `- ${n}: ${why}`).join("\n")}`);
+          this.store.setSetting(knownKey, true);
+        }
+        const skipNote = repeated.length ? `Not sent to the agent: ${repeated.length} repeated finding(s) already shown to be fixed or not applying (${repeated.join("; ")})` : null;
         const handledKey = `handled:${run.id}:${status.headSha}`;
-        if (failing.length && !reviews.length && !comments.length && this.store.setting(handledKey, false)) {
+        if (blocking.length && !reviews.length && !comments.length && this.store.setting(handledKey, false)) {
           await this.fail(run.id, `CI still fails on ${status.headSha?.slice(0, 8)} and the agent's last fix did not change the code; a human needs to look`);
           continue;
         }
-        if (failing.length || reviews.length || comments.length) {
+        if (blocking.length || reviews.length || comments.length) {
           const slot = this.freeSlot();
           if (slot === null) {
-            this.watchNote(run, `${pr}: ${[failing.length ? `CI failed (${failing.map((f) => f.name).join(", ")})` : "", reviews.length + comments.length ? `${reviews.length + comments.length} new review item(s)` : ""].filter(Boolean).join(" and ")}; waiting for a free agent slot`);
+            this.watchNote(run, `${pr}: ${[blocking.length ? `CI failed (${blocking.map((f) => f.name).join(", ")})` : "", reviews.length + comments.length ? `${reviews.length + comments.length} new review item(s)` : ""].filter(Boolean).join(" and ")}; waiting for a free agent slot`);
             continue;
           }
           if (run.fixRounds >= this.budgets.maxFixRounds) {
             await this.fail(run.id, `Still failing after ${run.fixRounds} fix rounds`);
             continue;
           }
-          const logs = await Promise.all(failing.map(async (check) => ({ check, log: await ctx.prHost.failureLog(check).catch(() => null) })));
+          const logs = await Promise.all(blocking.map(async (check) => ({ check, log: await ctx.prHost.failureLog(check).catch(() => null) })));
           const round = run.fixRounds + 1;
-          if (failing.length) this.store.setSetting(handledKey, true);
-          const newest = [...reviews.map((r) => r.submittedAt), ...comments.map((c) => c.createdAt)].sort().at(-1) ?? seen;
+          if (blocking.length) this.store.setSetting(handledKey, true);
+          const newest = [...reviews.map((r) => r.submittedAt), ...fresh.map((c) => c.createdAt)].sort().at(-1) ?? seen;
+          this.rememberFindings(run, comments, status.comments);
           this.setPending(run.id, { requestId: `${run.id}:pr-feedback:${round}`, author: "feedback", text: feedbackPrompt({ failing: logs, reviews, comments }), attachmentIds: [] });
-          if (failing.length) this.event(run.id, "ci", `CI failed: ${failing.map((f) => f.name).join(", ")}`);
+          if (blocking.length) this.event(run.id, "ci", `CI failed: ${blocking.map((f) => f.name).join(", ")}`);
           if (reviews.length || comments.length) this.event(run.id, "review", `${reviews.length + comments.length} new review item(s)`);
           await this.setTaskStatus(run.id, "in_progress", `:pr:${round}`);
           this.update(run.id, { phase: "fixing", fixRounds: round, slot, lastCommentSeenAt: newest, activity: "Addressing PR feedback" });
+          if (skipNote) this.event(run.id, "review", skipNote);
           void this.drive(run.id);
           continue;
+        }
+        if (skipNote) {
+          this.update(run.id, { lastCommentSeenAt: fresh.map((c) => c.createdAt).sort().at(-1)! });
+          this.event(run.id, "review", skipNote);
         }
         const pushedAt = this.store.setting<number>(`pushedAt:${run.id}`, 0);
         if (checkState === "neutral" && Date.now() - pushedAt < this.config.intervalsMs.ciGrace) {
@@ -2274,8 +2368,8 @@ export class Orchestrator {
           continue;
         }
         let waitingFor = run.phase === "waiting_ci" ? "CI" : "human review";
-        if (run.phase === "waiting_ci" && (checkState === "success" || checkState === "neutral")) {
-          this.event(run.id, "ci", checkState === "success" ? "CI passed" : "No CI checks reported");
+        if (run.phase === "waiting_ci" && (ownState === "success" || ownState === "neutral")) {
+          this.event(run.id, "ci", known.size ? `CI passed except checks this change did not cause (${[...known.keys()].join(", ")})` : checkState === "success" ? "CI passed" : "No CI checks reported");
           const n = this.store.setting<number>(`pushRound:${run.id}`, 0);
           await this.setTaskStatus(run.id, "ready_for_review", `:${n}`);
           await this.comment(run.id, `ready:${run.id}:${n}`, `Ready for review: ${run.prUrl}`);

@@ -5,7 +5,7 @@ const LEGACY = { name: "Nightshift", email: "nightshift@localhost" };
 const FALLBACK: CommitAuthor = { ...LEGACY, source: "default" };
 
 const repoCache = new Map<string, { at: number; author: CommitAuthor }>();
-let githubCache: { at: number; author: CommitAuthor | null } | null = null;
+let githubCache: { at: number; author: CommitAuthor | null; login: string | null } | null = null;
 
 const gitConfig = (cwd: string, key: string) => {
   try {
@@ -18,6 +18,7 @@ const gitConfig = (cwd: string, key: string) => {
 function githubAuthor(): CommitAuthor | null {
   if (githubCache && Date.now() - githubCache.at < 10 * 60_000) return githubCache.author;
   let author: CommitAuthor | null = null;
+  let user: string | null = null;
   try {
     const out = execFileSync("gh", ["api", "user", "--jq", "[.id, .login, (.name // \"\")] | @tsv"], {
       encoding: "utf8",
@@ -27,9 +28,16 @@ function githubAuthor(): CommitAuthor | null {
     }).trim();
     const [id, login, name] = out.split("\t");
     if (id && login) author = { name: name?.trim() || login, email: `${id}+${login}@users.noreply.github.com`, source: "github" };
+    user = login || null;
   } catch {}
-  githubCache = { at: Date.now(), author };
+  githubCache = { at: Date.now(), author, login: user };
   return author;
+}
+
+/** The GitHub login `gh` is signed in as: the owner, whose PR comments always reach the agent. */
+export function githubLogin(): string | null {
+  githubAuthor();
+  return githubCache?.login ?? null;
 }
 
 export function commitAuthor(config: NightshiftConfig, repoPath: string): CommitAuthor {

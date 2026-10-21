@@ -45,7 +45,10 @@ export function answerPrompt(comments: TaskComment[]) {
 }
 
 export function feedbackPrompt(input: { failing: Array<{ check: PrCheck; log: string | null }>; reviews: PrReview[]; comments: PrComment[] }) {
-  const parts = ["New feedback arrived on your pull request. Address all of it in your workspace, run the checks, then reply with a short summary of the changes."];
+  const parts = [
+    "New feedback arrived on your pull request. Address all of it in your workspace, run the checks, then reply with a short summary of the changes.",
+    "If a failing check is not caused by this branch (it also fails without your change, or the failing code is not in your diff), or a review finding is already fixed in the current code or does not apply, verify that, then call report_not_caused_here with the evidence instead of changing code. Fix everything that is yours.",
+  ];
   if (input.failing.length) {
     parts.push("", "## CI failed");
     for (const f of input.failing) {
@@ -59,7 +62,7 @@ export function feedbackPrompt(input: { failing: Array<{ check: PrCheck; log: st
   }
   if (input.comments.length) {
     parts.push("", "## Review comments");
-    for (const c of input.comments) parts.push(`- ${c.author}${c.path ? ` on ${c.path}${c.line ? `:${c.line}` : ""}` : ""}: ${c.body}`);
+    for (const c of input.comments) parts.push(`- [${c.id}] ${c.author}${c.path ? ` on ${c.path}${c.line ? `:${c.line}` : ""}` : ""}: ${c.body}`);
   }
   return parts.join("\n");
 }
