@@ -54,7 +54,10 @@ import { SkillsService, skillsSection } from "./skills/service.ts";
 import { syncLocalFiles } from "./workspace/local-files.ts";
 import { diagnoseSetup, lastError, tailLines } from "./workspace/setup-ai.ts";
 import { commitAuthor, githubLogin } from "./identity.ts";
-import { finding } from "./verification/stale.ts";
+import { answersCommand, finding, isCommand, isNightshiftComment, nightshiftMark } from "./verification/stale.ts";
+
+/** Most PR comments the agent may propose on one task (D40). */
+const MAX_PR_COMMENTS = 5;
 import { createRepo, ensureReady, GithubError, pushHint, pushUrl, repoUrls, setDefaultBranch, tail, validateRepoInput } from "./github.ts";
 import { answerPrompt, feedbackPrompt, instructions, localChecksPrompt, operatorNotes, prBody, taskPrompt } from "./prompts.ts";
 
@@ -368,7 +371,8 @@ export class Orchestrator {
       for (const i of this.vlog.openIssues(run.id)) if (i.sourceName === decision.source && !i.decisionId) this.vlog.setIssueStatus(run.id, i.id, "dismissed");
     }
     await this.comment(run.id, `decision-answer:${decision.id}`, `Decision: ${decision.question}\n→ ${text}`).catch(() => {});
-    if (this.vlog.openDecisions(run.id).length) return { decision, effect: "Recorded. Other decisions are still open." };
+    if (decision.kind === "pr-comment") return { decision, effect: await this.postPrComment(run, decision, text) };
+    if (this.vlog.openDecisions(run.id).some((d) => d.kind !== "pr-comment")) return { decision, effect: "Recorded. Other decisions are still open." };
     if (decision.kind === "setup") {
       const fix = this.store.setting<{ command: string | null; failed: string; output: string } | null>(`setupFix:${run.id}`, null);
       if (/^stop/i.test(text)) {
@@ -848,6 +852,25 @@ export class Orchestrator {
       this.event(rc.runId, "question", question);
     },
     checks: (rc) => this.ctx(rc.projectId).project.checks,
+    proposePrComment: async (rc, input) => {
+      const run = this.store.getRun(rc.runId)!;
+      if (!run.prNumber) return "This task has no pull request yet, so there is nothing to comment on.";
+      const body = input.body.trim();
+      if (!body) return "The comment is empty; nothing was proposed.";
+      const sent = this.store.setting<Record<string, { key: string; title: string }>>(`sentFindings:${run.id}`, {});
+      if (input.replyTo && !sent[input.replyTo]) return `Unknown review comment id ${input.replyTo}. Use an id in brackets from the feedback message${Object.keys(sent).length ? ` (${Object.keys(sent).join(", ")})` : ""}, or leave replyTo out to comment on the pull request.`;
+      const once = `prCommentAsk:${run.id}:${input.replyTo ?? "pr"}:${run.headSha ?? "none"}`;
+      if (this.store.setting(once, false)) return "A comment for this thread on this commit was already proposed; it waits for the owner. Do not propose it again.";
+      const asked = this.store.setting<number>(`prCommentCount:${run.id}`, 0);
+      if (asked >= MAX_PR_COMMENTS) return `${asked} PR comments were already proposed on this task, the limit. Put it in your summary instead.`;
+      this.store.setSetting(once, true);
+      this.store.setSetting(`prCommentCount:${run.id}`, asked + 1);
+      const where = input.replyTo ? `this reply in the thread "${sent[input.replyTo].title}"` : "this comment";
+      const decision = this.vlog.addDecision(run.id, { kind: "pr-comment", question: `Post ${where} on PR #${run.prNumber}?`, context: `${body}\n\nWhy: ${input.reason}`, options: ["Post it", "Don't post"], source: "Agent" });
+      this.store.setSetting(`prCommentProposal:${decision.id}`, { body, replyTo: input.replyTo ?? null });
+      await this.comment(run.id, `pr-comment-ask:${decision.id}`, `Approval needed: the agent wants to post on PR #${run.prNumber}:\n\n${body}`);
+      return "Proposed. Nothing is posted until the owner approves it. Carry on with your work.";
+    },
     reportNotCausedHere: async (rc, input, key) => {
       const lines: string[] = [];
       const unknown: string[] = [];
@@ -2035,7 +2058,7 @@ export class Orchestrator {
     await ctx.workspaces.commitAll(run.worktree, `${subject}\n\n${summary ?? ""}`.trim());
     const testers = (ctx.project.testers ?? []).filter((t) => t.enabled);
     const handle = async (blocking: Issue[], decisions: Decision[]): Promise<boolean | null> => {
-      if (decisions.length || this.vlog.openDecisions(run.id).length) {
+      if (decisions.length || this.vlog.openDecisions(run.id).some((d) => d.kind !== "pr-comment")) {
         await this.pauseForDecisions(run);
         return false;
       }
@@ -2229,18 +2252,47 @@ export class Orchestrator {
     return out;
   }
 
-  /** New PR comments without the inline findings the agent already showed are fixed or do not apply, which bots repeat; the owner's own comments always go through (D39). */
-  private withoutStaleFindings(run: Run, fresh: PrComment[], all: PrComment[]) {
+  /**
+   * New PR comments that are feedback for the agent. Left out: Nightshift's own comments, commands like
+   * "@greptile-apps retest" and the bots' answers to them (D40), and inline findings the agent already showed are fixed
+   * or do not apply when someone other than the owner repeats them (D39).
+   */
+  private feedbackComments(run: Run, fresh: PrComment[], all: PrComment[]) {
     const dismissed = this.store.setting<Record<string, { title: string; reason: string }>>(`staleFindings:${run.id}`, {});
     const owner = githubLogin();
     const comments: PrComment[] = [];
     const repeated: string[] = [];
+    let commands = 0;
     for (const c of fresh) {
+      if (isNightshiftComment(c.body) || isCommand(c.body) || answersCommand(c, all)) {
+        commands++;
+        continue;
+      }
       const key = c.author === owner ? null : finding(c, all)?.key;
       if (key && dismissed[key]) repeated.push(dismissed[key].title);
       else comments.push(c);
     }
-    return { comments, repeated };
+    const skipped = [
+      commands ? `${commands} command(s) like "@bot retest" or the bots' answers to them` : "",
+      repeated.length ? `${repeated.length} repeated finding(s) already shown to be fixed or not applying (${repeated.join("; ")})` : "",
+    ].filter(Boolean);
+    return { comments, skipNote: skipped.length ? `Not sent to the agent: ${skipped.join(", and ")}` : null };
+  }
+
+  /** Posts a PR comment the owner approved. Safe to repeat: a comment that already carries its marker is not posted again. */
+  private async postPrComment(run: Run, decision: Decision, answer: string) {
+    const proposal = this.store.setting<{ body: string; replyTo: string | null } | null>(`prCommentProposal:${decision.id}`, null);
+    if (!proposal || !run.prNumber) return "There is nothing to post.";
+    if (!/^post/i.test(answer)) {
+      this.event(run.id, "info", "PR comment not posted: you declined it");
+      return "Not posted.";
+    }
+    const ctx = this.runCtx(run);
+    const mark = nightshiftMark(`pr-comment:${decision.id}`);
+    const status = await ctx.prHost.status(run.prNumber);
+    if (!status.comments.some((c) => c.body.includes(mark))) await ctx.prHost.comment(run.prNumber, `${proposal.body}\n\n${mark}`, proposal.replyTo ?? undefined);
+    this.event(run.id, "pr", `Posted on PR #${run.prNumber}: ${proposal.body.split("\n")[0].slice(0, 200)}`);
+    return `Posted on PR #${run.prNumber}.`;
   }
 
   /** The inline findings sent to the agent, by comment id, so it can report one as already fixed. */
@@ -2303,7 +2355,7 @@ export class Orchestrator {
         const seen = run.lastCommentSeenAt ?? run.createdAt;
         const reviews = triggers.prFeedback.enabled ? status.reviews.filter((r) => r.submittedAt > seen && (r.state === "CHANGES_REQUESTED" || (r.body ?? "").trim())) : [];
         const fresh = triggers.prFeedback.enabled ? status.comments.filter((c) => c.createdAt > seen) : [];
-        const { comments, repeated } = this.withoutStaleFindings(run, fresh, status.comments);
+        const { comments, skipNote } = this.feedbackComments(run, fresh, status.comments);
         const checkState = summarizeChecks(status.checks);
         const failing = checkState === "failure" && triggers.ciFailures.enabled ? status.checks.filter((c) => c.state === "failure") : [];
         const known = failing.length ? await this.notCausedHere(run, ctx, failing, status.headSha) : new Map<string, string>();
@@ -2328,7 +2380,6 @@ export class Orchestrator {
           await this.comment(run.id, knownKey, `CI fails on checks this change did not cause, so they do not hold the task:\n${[...known].map(([n, why]) => `- ${n}: ${why}`).join("\n")}`);
           this.store.setSetting(knownKey, true);
         }
-        const skipNote = repeated.length ? `Not sent to the agent: ${repeated.length} repeated finding(s) already shown to be fixed or not applying (${repeated.join("; ")})` : null;
         const handledKey = `handled:${run.id}:${status.headSha}`;
         if (blocking.length && !reviews.length && !comments.length && this.store.setting(handledKey, false)) {
           await this.fail(run.id, `CI still fails on ${status.headSha?.slice(0, 8)} and the agent's last fix did not change the code; a human needs to look`);

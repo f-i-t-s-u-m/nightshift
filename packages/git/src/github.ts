@@ -154,6 +154,12 @@ export class GithubPrHost implements PrHost {
     return [...latest.values()];
   }
 
+  async comment(number: number, body: string, replyTo?: string): Promise<void> {
+    const inline = replyTo?.match(/^inline-(\d+)$/)?.[1];
+    if (inline) await this.gh(["api", "-X", "POST", `repos/{owner}/{repo}/pulls/${number}/comments/${inline}/replies`, "-f", `body=${body}`]);
+    else await this.gh(["pr", "comment", String(number), "--body", body]);
+  }
+
   async failureLog(check: PrCheck): Promise<string | null> {
     const runId = check.detailsUrl?.match(/actions\/runs\/(\d+)/)?.[1];
     if (!runId) return null;

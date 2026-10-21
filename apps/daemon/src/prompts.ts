@@ -48,6 +48,7 @@ export function feedbackPrompt(input: { failing: Array<{ check: PrCheck; log: st
   const parts = [
     "New feedback arrived on your pull request. Address all of it in your workspace, run the checks, then reply with a short summary of the changes.",
     "If a failing check is not caused by this branch (it also fails without your change, or the failing code is not in your diff), or a review finding is already fixed in the current code or does not apply, verify that, then call report_not_caused_here with the evidence instead of changing code. Fix everything that is yours.",
+    "To ask a review bot to re-check a finding you fixed, use propose_pr_comment (the owner approves it before it is posted).",
   ];
   if (input.failing.length) {
     parts.push("", "## CI failed");

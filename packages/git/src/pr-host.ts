@@ -28,6 +28,8 @@ export interface PrHost {
   failureLog(check: PrCheck): Promise<string | null>;
   /** The latest finished result of each check on the base branch's recent commits, to tell failures a PR caused from ones already there. */
   baseChecks?(branch: string): Promise<PrCheck[]>;
+  /** Posts a comment on the PR, or a reply in the inline thread of `replyTo` (a PrComment id). */
+  comment(number: number, body: string, replyTo?: string): Promise<void>;
 }
 
 export function summarizeChecks(checks: PrCheck[]): CheckState {

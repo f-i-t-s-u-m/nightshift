@@ -77,6 +77,12 @@ export class LocalPrHost implements PrHost {
     return { state: pr.state, headSha: head, checks, reviews: pr.reviews, comments: pr.comments };
   }
 
+  async comment(number: number, body: string, replyTo?: string): Promise<void> {
+    this.update(number, (pr) => {
+      pr.comments.push({ id: `local-${pr.comments.length + 1}`, author: "nightshift", body, createdAt: new Date().toISOString(), ...(replyTo ? { replyTo } : {}) });
+    });
+  }
+
   async failureLog(check: PrCheck): Promise<string | null> {
     return check.summary ?? null;
   }

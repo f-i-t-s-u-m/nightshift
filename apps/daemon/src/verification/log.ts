@@ -185,8 +185,9 @@ export class VerificationLog {
     });
   }
 
+  /** A message answers every open decision except approvals to post on the PR, which only their own buttons answer. */
   answerOpenDecisions(runId: string, answer: string) {
-    for (const d of this.doc(runId).decisions.filter((x) => x.status === "open")) this.answerDecision(runId, d.id, answer);
+    for (const d of this.doc(runId).decisions.filter((x) => x.status === "open" && x.kind !== "pr-comment")) this.answerDecision(runId, d.id, answer);
   }
 
   openDecisions(runId: string) {

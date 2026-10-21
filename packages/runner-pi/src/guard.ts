@@ -5,7 +5,7 @@ const FILE_TOOLS = new Set(["read", "write", "edit"]);
 
 const BLOCKED_COMMANDS: Array<[RegExp, string]> = [
   [/(^|[\s;&|(])git\s+push\b/, "Nightshift pushes for you after the work is done; do not push."],
-  [/(^|[\s;&|(])gh\s+(pr|api|release|repo)\b/, "Nightshift manages pull requests; do not use gh."],
+  [/(^|[\s;&|(])gh\s+(pr|api|release|repo)\b/, "Nightshift manages pull requests; do not use gh. To comment on the pull request, use propose_pr_comment (the owner approves it first)."],
   [/(^|[\s;&|(])sudo\b/, "sudo is not allowed."],
   [/(^|[\s;&|(])git\s+(checkout|switch)\s+(-b\s+)?(main|master)\b/, "Stay on the task branch."],
   [/\.env\.(dev|prod|production|staging)\b/, "Shared or production env files are off limits."],

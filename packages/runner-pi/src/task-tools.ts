@@ -11,6 +11,7 @@ export interface RunBridge {
   postComment(run: RunContext, body: string, idempotencyKey: string): Promise<void>;
   askQuestion(run: RunContext, question: string, idempotencyKey: string, options?: string[]): Promise<void>;
   checks(run: RunContext): CheckConfig[];
+  proposePrComment(run: RunContext, input: { body: string; replyTo?: string; reason: string }): Promise<string>;
   reportNotCausedHere(run: RunContext, input: { ci?: Array<{ check: string; reason: string }>; feedback?: Array<{ id: string; reason: string }> }, idempotencyKey: string): Promise<string>;
   submitPlan(run: RunContext, plan: string, idempotencyKey: string): Promise<void>;
   preview(run: RunContext, action: "start" | "restart" | "stop" | "status", probe?: string, service?: string): Promise<string>;
@@ -143,6 +144,19 @@ export function createTaskToolsExtension(bridge: RunBridge) {
     },
   });
 
+  const proposePrComment = defineTool({
+    name: "propose_pr_comment",
+    description:
+      "Propose a comment on the pull request, e.g. asking a review bot to re-check a finding you fixed (\"@greptile-apps retest\" as a reply in its thread). Nothing is posted until the task owner approves it, and it does not wait for that: carry on. One proposal per thread per commit, and a few per task, so use it only when a comment is really needed; explanations for the reviewer belong in your summary or report_not_caused_here.",
+    parameters: Type.Object({
+      body: Type.String({ description: "The exact comment text" }),
+      replyTo: Type.Optional(Type.String({ description: "The review comment id in brackets from the feedback message, to reply in its thread" })),
+      reason: Type.String({ description: "Why this comment is needed, shown to the owner" }),
+    }),
+    replay: "safe",
+    execute: async (args, api) => text(await bridge.proposePrComment(ctxOf(api as unknown as Api), args)),
+  });
+
   const preview = defineTool({
     name: "preview",
     description:
@@ -178,5 +192,5 @@ export function createTaskToolsExtension(bridge: RunBridge) {
     return run ? bridge.localFilesNote(run) : undefined;
   });
 
-  return defineExtension({ name: "nightshift-task", tools: [getTask, listComments, postComment, askQuestion, runChecks, reportNotCausedHere, preview, database], sections: [taskType, skills, localFiles] });
+  return defineExtension({ name: "nightshift-task", tools: [getTask, listComments, postComment, askQuestion, runChecks, reportNotCausedHere, proposePrComment, preview, database], sections: [taskType, skills, localFiles] });
 }

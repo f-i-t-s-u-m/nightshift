@@ -20,7 +20,7 @@ export type Issue = {
   decisionId?: string;
 };
 
-export type DecisionKind = "agent-question" | "finding" | "loop-limit" | "plan" | "deletion" | "budget" | "push" | "setup" | "tester";
+export type DecisionKind = "agent-question" | "finding" | "loop-limit" | "plan" | "deletion" | "budget" | "push" | "setup" | "tester" | "pr-comment";
 
 export type Decision = {
   id: string;
