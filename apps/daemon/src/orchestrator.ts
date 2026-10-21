@@ -281,7 +281,19 @@ export class Orchestrator {
   private async watchAgentPrs(ctx: ProjectContext, t: TriggerConfig) {
     const prs = (await ctx.prHost.listOpen()).filter((p) => p.branch.startsWith(ctx.project.repo.branchPrefix));
     for (const pr of prs) {
-      if (this.activeTaskForBranch(ctx.project.id, pr.branch)) continue;
+      // A PR that has a task stays with it: a failed or stopped task waits for the owner ("a human needs to look"), and
+      // a new task for its PR would fail the same way and be followed by another (T-5 to T-11 on 2026-10-21, D41).
+      const owners = this.store.runsForProject(ctx.project.id).filter((r) => r.branch === pr.branch || r.prNumber === pr.number);
+      const owner = owners.sort((a, b) => a.createdAt.localeCompare(b.createdAt))[0];
+      if (owner) {
+        const noted = `trigOwned:${ctx.project.id}:${pr.number}:${owner.taskId}`;
+        const latest = owners.at(-1)!;
+        if (["failed", "stopped"].includes(latest.phase) && !this.store.setting(noted, false)) {
+          this.store.setSetting(noted, true);
+          this.triggerEvent(ctx.project.id, { kind: "pr-feedback", ref: `PR #${pr.number}`, url: pr.url, taskId: owner.taskId, note: `belongs to ${owner.taskId} (${latest.phase}); no new task is made for it, message ${owner.taskId} to continue` });
+        }
+        continue;
+      }
       const key = `trig:${ctx.project.id}:pr:${pr.number}`;
       const status = await ctx.prHost.status(pr.number);
       const latest = [...status.comments.map((c) => c.createdAt), ...status.reviews.map((r) => r.submittedAt)].sort().at(-1) ?? "";
@@ -291,12 +303,12 @@ export class Orchestrator {
         this.store.setSetting(key, state);
       }
       if (await this.pendingTriggeredTask(ctx.project.id, pr.branch)) continue;
-      const lastRun = this.store.runsForProject(ctx.project.id).find((r) => r.branch === pr.branch);
-      const title = lastRun?.taskTitle ?? pr.branch.replace(ctx.project.repo.branchPrefix, "");
+      const title = pr.branch.replace(ctx.project.repo.branchPrefix, "");
       const live = this.triggersOf(this.projects.get(ctx.project.id)?.project ?? ctx.project);
       if (t.prFeedback.enabled && live.prFeedback.enabled) {
         const reviews = status.reviews.filter((r) => r.submittedAt > state.seenAt && (r.state === "CHANGES_REQUESTED" || (r.body ?? "").trim()));
-        const comments = status.comments.filter((c) => c.createdAt > state.seenAt);
+        const { comments } = this.feedbackComments(null, status.comments.filter((c) => c.createdAt > state.seenAt), status.comments);
+        if (!reviews.length && !comments.length && latest > state.seenAt) this.store.setSetting(key, { ...state, seenAt: latest });
         if (reviews.length || comments.length) {
           const feedback = [
             ...reviews.map((r) => `- ${r.author} (${r.state}): ${r.body || "(no text)"}`),
@@ -313,7 +325,13 @@ export class Orchestrator {
         }
       }
       if (t.ciFailures.enabled && live.ciFailures.enabled && summarizeChecks(status.checks) === "failure" && status.headSha && state.ciSha !== status.headSha) {
-        const failing = status.checks.filter((c) => c.state === "failure");
+        const red = status.checks.filter((c) => c.state === "failure");
+        const known = await this.notCausedHere({ id: `pr:${ctx.project.id}:${pr.number}`, base: pr.base }, ctx, red, status.headSha);
+        const failing = red.filter((c) => !known.has(c.name));
+        if (!failing.length) {
+          this.store.setSetting(key, { ...state, ciSha: status.headSha });
+          continue;
+        }
         const logs = await Promise.all(failing.map(async (c) => `### ${c.name}\n${(await ctx.prHost.failureLog(c).catch(() => null)) ?? c.detailsUrl ?? ""}`));
         const item = await this.createTask(
           ctx.project.id,
@@ -2233,14 +2251,17 @@ export class Orchestrator {
     await this.comment(run.id, `pr-link:${run.id}`, `Pull request opened: ${pr.url}`);
   }
 
-  /** Failing CI checks this PR did not cause, with why: the check fails on the base branch too, or the agent reported it comes from elsewhere (D39). */
-  private async notCausedHere(run: Run, ctx: ProjectContext, failing: PrCheck[], headSha: string | null): Promise<Map<string, string>> {
+  /**
+   * Failing CI checks this PR did not cause, with why: the check fails on the base branch too, or the agent reported it
+   * comes from elsewhere (D39). `scope` is the run, or the PR for the triggers (no agent claims there).
+   */
+  private async notCausedHere(scope: { id: string; base: string }, ctx: ProjectContext, failing: PrCheck[], headSha: string | null): Promise<Map<string, string>> {
     const out = new Map<string, string>();
-    const claims = this.store.setting<Record<string, { reason: string }>>(`unrelatedCi:${run.id}`, {});
+    const claims = this.store.setting<Record<string, { reason: string }>>(`unrelatedCi:${scope.id}`, {});
     for (const c of failing) if (claims[c.name]) out.set(c.name, `the agent found it is not caused by this change: ${claims[c.name].reason}`);
     if (!ctx.prHost.baseChecks || out.size === failing.length) return out;
-    const base = this.baseOf(run);
-    const key = `baseCi:${run.id}:${headSha}`;
+    const base = scope.base;
+    const key = `baseCi:${scope.id}:${headSha}`;
     let failingOnBase = this.store.setting<string[] | null>(key, null);
     if (!failingOnBase) {
       const checks = await ctx.prHost.baseChecks(base).catch(() => null);
@@ -2257,8 +2278,8 @@ export class Orchestrator {
    * "@greptile-apps retest" and the bots' answers to them (D40), and inline findings the agent already showed are fixed
    * or do not apply when someone other than the owner repeats them (D39).
    */
-  private feedbackComments(run: Run, fresh: PrComment[], all: PrComment[]) {
-    const dismissed = this.store.setting<Record<string, { title: string; reason: string }>>(`staleFindings:${run.id}`, {});
+  private feedbackComments(runId: string | null, fresh: PrComment[], all: PrComment[]) {
+    const dismissed = runId ? this.store.setting<Record<string, { title: string; reason: string }>>(`staleFindings:${runId}`, {}) : {};
     const owner = githubLogin();
     const comments: PrComment[] = [];
     const repeated: string[] = [];
@@ -2355,10 +2376,10 @@ export class Orchestrator {
         const seen = run.lastCommentSeenAt ?? run.createdAt;
         const reviews = triggers.prFeedback.enabled ? status.reviews.filter((r) => r.submittedAt > seen && (r.state === "CHANGES_REQUESTED" || (r.body ?? "").trim())) : [];
         const fresh = triggers.prFeedback.enabled ? status.comments.filter((c) => c.createdAt > seen) : [];
-        const { comments, skipNote } = this.feedbackComments(run, fresh, status.comments);
+        const { comments, skipNote } = this.feedbackComments(run.id, fresh, status.comments);
         const checkState = summarizeChecks(status.checks);
         const failing = checkState === "failure" && triggers.ciFailures.enabled ? status.checks.filter((c) => c.state === "failure") : [];
-        const known = failing.length ? await this.notCausedHere(run, ctx, failing, status.headSha) : new Map<string, string>();
+        const known = failing.length ? await this.notCausedHere({ id: run.id, base: this.baseOf(run) }, ctx, failing, status.headSha) : new Map<string, string>();
         const blocking = failing.filter((c) => !known.has(c.name));
         const ownState = summarizeChecks(status.checks.filter((c) => !known.has(c.name)));
         const ciKey = `ciState:${run.id}:${status.headSha}`;
