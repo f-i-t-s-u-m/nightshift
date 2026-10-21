@@ -9,6 +9,7 @@ import { createModelSetup } from "./models.ts";
 import { ModelsService } from "./models/service.ts";
 import { startHttp } from "./http.ts";
 import { Orchestrator } from "./orchestrator.ts";
+import { ProcessGuard } from "./process-guard.ts";
 
 export type Daemon = {
   orchestrator: Orchestrator;
@@ -86,6 +87,21 @@ export async function startDaemon(config: NightshiftConfig, options: { webDir?: 
   const port = typeof address === "object" && address ? address.port : config.http.port;
   const url = `http://${config.http.host}:${port}`;
   orchestrator.setPort(port ?? 0);
+  const guard = new ProcessGuard((r) => {
+    const where = r.cwd ? ` in ${r.cwd}` : "";
+    log(`Stopped a runaway command${where}: ${r.command.slice(0, 200)} (${r.processes} processes, ${(r.memoryBytes / 2 ** 30).toFixed(1)} GB): ${r.reason}`);
+    const run = r.cwd
+      ? store
+          .listRuns(5000)
+          .filter((x) => x.worktree && (r.cwd === x.worktree || r.cwd!.startsWith(`${x.worktree}/`)))
+          .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0]
+      : undefined;
+    if (run) {
+      const rel = r.cwd === run.worktree ? "" : ` (in ${path.relative(run.worktree!, r.cwd!)})`;
+      orchestrator.event(run.id, "error", `Nightshift stopped a runaway command${rel}: \`${r.command.slice(0, 200)}\`. Reason: ${r.reason}. ${r.processes} processes were killed. Fix the script in the repository; running it again will be stopped again.`);
+    }
+  });
+  guard.start();
   const reapedPreviews = orchestrator.workspace.previews.reapLeftovers();
   if (reapedPreviews.length) log(`Stopped ${reapedPreviews.length} leftover preview server(s)`);
   await modelsService.refreshBilling();
@@ -99,6 +115,7 @@ export async function startDaemon(config: NightshiftConfig, options: { webDir?: 
     server,
     url,
     stop: async () => {
+      guard.stop();
       await orchestrator.stop();
       server.closeAllConnections();
       await new Promise<void>((resolve) => server.close(() => resolve()));

@@ -35,7 +35,7 @@ function grow(tracked: Set<number>, table: Map<number, number>) {
 }
 
 /** Freezes the tree first so a process cannot start a new child between the scan and the kill, then kills it. */
-async function killTree(tracked: Set<number>) {
+export async function killTree(tracked: Set<number>) {
   for (let i = 0; i < 5 && tracked.size; i++) {
     const table = await processTable();
     if (!table) break;
