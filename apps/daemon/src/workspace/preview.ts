@@ -443,7 +443,8 @@ export class PreviewManager {
     }
     const { vars, env: crossEnv } = this.templateVars(g, defs, lan);
     const fill = (value: string) => value.replace(/\{\{\s*([\w-]+\.(?:url|publicUrl|port|lanUrl|host))\s*\}\}/g, (m, k: string) => vars[k] ?? m);
-    if (g.taskId !== SHARED) {
+    // Env-file overrides are for Nightshift's own worktrees; a task working in the owner's project folder leaves its files alone.
+    if (g.taskId !== SHARED && !this.isProjectFolder(g.projectId, root)) {
       const notes = this.overlays.apply(g.projectId, g.taskId, root, overlayFiles(defs, fill));
       for (const d of wanted) {
         const own = Object.keys(d.envFiles ?? {}).map((f) => path.posix.join(d.cwd ?? "", f));
@@ -631,10 +632,15 @@ export class PreviewManager {
   /** Writes the file overrides again with the ports of the task's running apps (after they were restored for a merge). */
   reapplyOverlays(projectId: string, taskId: string, root: string, config: PreviewConfig) {
     const g = this.groups.get(this.key(projectId, taskId));
-    if (!g || ![...g.services.values()].some((s) => s.status !== "stopped")) return;
+    if (!g || ![...g.services.values()].some((s) => s.status !== "stopped") || this.isProjectFolder(projectId, root)) return;
     const defs = servicesOf(config).filter((d) => !d.shared);
     const { vars } = this.templateVars(g, defs, g.target === "device" ? lanAddress() : null);
     this.overlays.apply(projectId, taskId, root, overlayFiles(defs, (value) => value.replace(/\{\{\s*([\w-]+\.(?:url|publicUrl|port|lanUrl|host))\s*\}\}/g, (m, k: string) => vars[k] ?? m)));
+  }
+
+  private isProjectFolder(projectId: string, root: string) {
+    const folder = this.sharedRoot?.(projectId);
+    return Boolean(folder) && path.resolve(folder!) === path.resolve(root);
   }
 
   runningEnv(projectId: string, taskId: string, service: string): EnvEntry[] | null {

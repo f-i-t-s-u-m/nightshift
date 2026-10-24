@@ -100,11 +100,12 @@ export class Workspaces {
     return sha || null;
   }
 
-  push(dir: string, branch: string): Promise<{ pushed: boolean; sha: string }> {
+  /** `force: false` never rewrites the remote branch (for branches the owner works on too). */
+  push(dir: string, branch: string, opts: { force?: boolean } = {}): Promise<{ pushed: boolean; sha: string }> {
     return this.serialized(async () => {
       const sha = await this.headSha(dir);
       if ((await this.remoteHead(branch)) === sha) return { pushed: false, sha };
-      await this.git(dir, ["push", "--quiet", "--force-with-lease", this.remote, `HEAD:refs/heads/${branch}`]);
+      await this.git(dir, ["push", "--quiet", ...(opts.force === false ? [] : ["--force-with-lease"]), this.remote, `HEAD:refs/heads/${branch}`]);
       return { pushed: true, sha };
     });
   }

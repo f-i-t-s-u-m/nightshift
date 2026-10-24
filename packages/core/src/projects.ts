@@ -99,6 +99,10 @@ export type TaskListItem = {
   openIssues: number;
   type: import("./task-types.ts").TaskType | null;
   preview: import("./workspace.ts").TaskPreviewSummary | null;
+  /** When the owner archived it: hidden from the task list and never picked up, until unarchived. */
+  archivedAt: string | null;
+  /** True when the agent works in the owner's project folder instead of its own worktree. */
+  inProjectFolder: boolean;
 };
 
 export type ProjectTasksResponse = {
@@ -161,6 +165,7 @@ export type TaskViewResponse = {
   messages: OperatorMessage[];
   attachments: AttachmentRef[];
   canMessage: { allowed: boolean; effect: string };
+  archivedAt: string | null;
 };
 
 export type NewTaskInput = {
@@ -173,7 +178,51 @@ export type NewTaskInput = {
   startFrom?: string;
   /** The owner's own id for the task (Nightshift's task list only). Empty: the project prefix and the next number. */
   id?: string;
+  /**
+   * "pr": continue an open pull request (`pr`) on its own branch, in a worktree of its own, updating that PR.
+   * "folder": the agent works in the project folder on the branch it has checked out (and that branch's PR).
+   */
+  workIn?: "worktree" | "pr" | "folder";
+  /** With workIn "pr": the pull request's number. */
+  pr?: number;
 };
+
+/** `GET /api/projects/:id/pulls`: open pull requests a task can continue. */
+export type ContinuablePr = {
+  number: number;
+  url: string;
+  title: string | null;
+  branch: string;
+  base: string;
+  /** Under the project's branch prefix (an agent branch); otherwise every push asks first. */
+  prefixed: boolean;
+  /** Why it cannot be continued in a worktree now (a task already works on it, or the project folder has it checked out), or null. */
+  blocked: string | null;
+};
+
+/** `GET /api/projects/:id/folder`: the project folder's git state, for working there instead of in a worktree. */
+export type ProjectFolderStatus = {
+  path: string;
+  /** The checked-out branch; null when HEAD is detached. */
+  branch: string | null;
+  /** True when that branch is the project's base branch: agents never commit to it. */
+  onBase: boolean;
+  /** True when the branch is under the project's branch prefix (Nightshift's own). */
+  prefixed: boolean;
+  /** Whether the branch exists on the remote. */
+  pushed: boolean;
+  /** Uncommitted changes (`git status --porcelain` lines, at most 20) and their total count. */
+  changes: string[];
+  changeCount: number;
+  pr: { number: number; url: string } | null;
+  /** A task already working in the folder. */
+  busyTask: string | null;
+  /** Why a folder task cannot start now, or null. */
+  blocked: string | null;
+};
+
+export type TaskArchiveUpdate = { archived: boolean };
+export type TaskArchiveResponse = { archivedAt: string | null; effect: string };
 
 export type TaskTypeUpdate = { type: import("./task-types.ts").TaskType | null };
 
@@ -193,6 +242,9 @@ export const PROJECT_ROUTES = {
   messages: (projectId: string, taskId: string) =>
     `/api/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}/messages`,
   taskType: (projectId: string, taskId: string) => `/api/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}/type`,
+  folder: (projectId: string) => `/api/projects/${encodeURIComponent(projectId)}/folder`,
+  pulls: (projectId: string) => `/api/projects/${encodeURIComponent(projectId)}/pulls`,
+  taskArchive: (projectId: string, taskId: string) => `/api/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}/archive`,
   uploads: "/api/uploads",
   upload: (id: string) => `/api/uploads/${encodeURIComponent(id)}`,
 } as const;

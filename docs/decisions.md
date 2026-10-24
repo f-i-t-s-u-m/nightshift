@@ -376,3 +376,31 @@ Some tasks cannot be finished by Nightshift: the CI failure comes from another b
 
 - **Mark as done** on the task (any phase except done; `POST /api/runs/:id/complete` with an optional `reason`): asks for confirmation and an optional reason, stops the agent and its testers, closes open decisions ("Closed: the task was marked done"), posts "Marked done by the owner: <reason>" on the task, sets the task's status to Done in its source (for WonderCall that is a status change there, keyed so a retry does it once), releases the lease, and ends the run as done (previews stop, the task database is dropped, terminals close; the worktree and branch stay).
 - The pull request stays open and is no longer watched: agents never merge or close PRs, so the owner merges or closes it on GitHub. A PR whose task is done is not picked up by the triggers (D41).
+
+## D43. The owner can archive stale tasks (2026-10-23)
+
+Stale tasks (abandoned, superseded, waiting on a PR nobody will review) stayed in the list and kept being watched. Marking them done (D42) is wrong for them: it posts a comment and moves the task to Done in its source.
+
+- **Archive** on the task row or the task page (`PUT /api/projects/:p/tasks/:t/archive` with `{ archived }`) is Nightshift-only: nothing is posted on the task and its status in the source does not change. A run that is still going or waiting (on CI, review or a decision) ends as stopped: the agent and testers stop, open decisions close ("Closed: the task was archived"), the lease is released, the PR stays open and is no longer watched; the worktree and branch stay. The task page asks first when a run would stop; the row button is hidden while the agent is working.
+- Archived tasks are hidden from the list and its counts (an "Archived" filter shows them), are never picked up even if Ready for AI, and refuse messages and Retry until unarchived. **Unarchive** only clears the flag; the stopped run is continued with a message or Retry as usual.
+
+## D44. A task can work in the owner's project folder, on its checked-out branch (2026-10-24)
+
+The owner wants an agent to continue work that is already on a local branch with a pushed pull request, in their own checkout, instead of a new worktree (a worktree cannot even check out a branch the folder has checked out, and a big repository needs a fresh install per worktree). New fact for D6: the owner wants agents to continue the owner's own branches and PRs.
+
+- **New task → "Where the agent works": My project folder** (`workIn: "folder"`; `GET /api/projects/:id/folder` shows the folder's branch, PR, uncommitted changes and why it cannot be used). The run's worktree is the project folder and its branch is the branch checked out there; its PR is found and reused. The task list marks such tasks "your folder".
+- **Refused** on the base branch, on a detached HEAD, and while another folder task of the project is active (one at a time; a second one is not picked up until the first ends).
+- **Uncommitted changes** in the folder pause the task before the agent starts ("Include them in the agent's work / Stop the task"), because its commits would include them.
+- **Branch switched by the owner**: the task stops with a clear message before any commit or push, rather than commit to the wrong branch.
+- **Nothing destructive in the folder**: the reviewer's `reset --hard` / `clean` is skipped, and so are the setup command, copying local files and env-file overrides (D31). Pushes never force (a remote branch with commits the folder lacks stops the task: "git pull in the folder, then retry"). Deleting the project never removes the folder.
+- **D6 amended**: a folder task on a branch outside the agent prefix may push to it, but **every push asks the owner first**, whatever the project's push mode. Branches under the prefix follow the project's push mode as before.
+- Commit subjects count only the agent's commits since the task started, not the owner's earlier ones.
+
+## D45. Moving existing pull requests into Nightshift: continue a PR on its own branch, in a worktree (2026-10-24)
+
+The owner has a few pull requests started outside Nightshift and wants agents to finish them on their branches, while new work keeps using worktrees. The folder mode (D44) works one task at a time in the owner's checkout, so it does not fit moving several PRs.
+
+- **New task → "Continue a pull request"** (`workIn: "pr"`, `pr: <number>`; `GET /api/projects/:id/pulls` lists the open PRs): the task gets a worktree of its own on the PR's branch (the same path the PR listeners use), its base is the PR's base, and pushing updates that PR (found by branch, never a new one). Several can run side by side.
+- **A PR cannot be continued** while a task works on its branch, while the branch is checked out in the project folder or another worktree (git allows one checkout per branch; the folder case suggests folder mode), or while the owner's local branch of that name has commits the PR lacks: creating the worktree resets that local branch to the PR's head, so they must be pushed first.
+- **The owner's branches** (anything outside the agent prefix, whether continued here or in the folder) are never force-pushed, and every push asks first whatever the project's push mode (extends D44's amendment of D6). A push rejected because the PR branch moved stops the task with what to do.
+- Commit subjects count only the agent's commits since the task started, for any task that starts on an existing branch.

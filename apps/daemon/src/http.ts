@@ -399,6 +399,17 @@ export function startHttp(options: {
           return send(res, (error as { status?: number }).status ?? 400, { error: error instanceof Error ? error.message : String(error) });
         }
       }
+      const folderMatch = p.match(/^\/api\/projects\/([^/]+)\/(folder|pulls)$/);
+      if (folderMatch && req.method === "GET") {
+        const id = decodeURIComponent(folderMatch[1]);
+        if (!orchestrator.projects.has(id)) return send(res, 404, { error: "Project not found" });
+        try {
+          if (folderMatch[2] === "pulls") return send(res, 200, { pulls: await orchestrator.continuablePrs(id) });
+          return send(res, 200, await orchestrator.folderStatus(id));
+        } catch (error) {
+          return send(res, 400, { error: error instanceof Error ? error.message : String(error) });
+        }
+      }
       const projectOnly = p.match(/^\/api\/projects\/([^/]+)(\/brief)?$/);
       if (projectOnly && (req.method === "PATCH" || (!projectOnly[2] && req.method === "DELETE") || (projectOnly[2] && req.method === "POST"))) {
         const id = decodeURIComponent(projectOnly[1]);
@@ -528,7 +539,7 @@ export function startHttp(options: {
           }
         }
       }
-      const projectMatch = p.match(/^\/api\/projects\/([^/]+)(?:\/tasks(?:\/([^/]+)(?:\/(messages|sessions|verification|type))?)?)?$/);
+      const projectMatch = p.match(/^\/api\/projects\/([^/]+)(?:\/tasks(?:\/([^/]+)(?:\/(messages|sessions|verification|type|archive))?)?)?$/);
       if (projectMatch) {
         const projectId = decodeURIComponent(projectMatch[1]);
         const taskId = projectMatch[2] ? decodeURIComponent(projectMatch[2]) : null;
@@ -541,6 +552,7 @@ export function startHttp(options: {
           if (isTasks && !taskId && req.method === "POST") return send(res, 200, { task: await orchestrator.createTask(projectId, (await readJson(req)) as never) });
           if (taskId && !sub && req.method === "GET") return send(res, 200, await orchestrator.taskView(projectId, taskId, url.searchParams.get("session") || undefined));
           if (taskId && sub === "type" && req.method === "PUT") return send(res, 200, orchestrator.setTaskType(projectId, taskId, ((await readJson(req)) as { type?: TaskType | null }).type ?? null));
+          if (taskId && sub === "archive" && req.method === "PUT") return send(res, 200, await orchestrator.setArchived(projectId, taskId, Boolean(((await readJson(req)) as { archived?: unknown }).archived)));
           if (taskId && sub === "verification" && req.method === "GET") return send(res, 200, orchestrator.verificationView(projectId, taskId));
           if (taskId && sub === "sessions" && req.method === "GET") {
             const run = store.latestRunForTask(projectId, taskId);

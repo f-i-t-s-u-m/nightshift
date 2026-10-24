@@ -1,5 +1,7 @@
 import { FS_ROUTES, GITHUB_ROUTES as G, LOCAL_FILES_ROUTES as L, SKILL_ROUTES as K, VERIFY_ROUTES as V, type FsListResponse, type FsMkdirResponse } from "@nightshift/core";
 import type {
+  ContinuablePr,
+  ProjectFolderStatus,
   ServiceEnvResponse,
   ServiceEnvUpdate,
   DeleteProjectResponse,
@@ -19,6 +21,8 @@ import type {
   StatusResponse,
   TaskViewResponse,
   TaskType,
+  TaskArchiveResponse,
+  TaskArchiveUpdate,
   TaskTypeUpdate,
   UploadResponse,
   UsageResponse,
@@ -166,7 +170,11 @@ export const api = {
   github: () => request<GithubStatus>(G.status),
   moveToGithub: (projectId: string, input: GithubRepoInput) => post<MoveToGithubResult>(G.moveProject(projectId), input),
   tasks: (projectId: string) => request<ProjectTasksResponse>(ROUTES.tasks(projectId)),
+  projectFolder: (projectId: string) => request<ProjectFolderStatus>(P.folder(projectId)),
+  projectPulls: (projectId: string) => request<{ pulls: ContinuablePr[] }>(P.pulls(projectId)),
   createTask: (projectId: string, input: NewTaskInput) => post<NewTaskResponse>(ROUTES.tasks(projectId), input),
+  setTaskArchived: (projectId: string, taskId: string, archived: boolean) =>
+    request<TaskArchiveResponse>(P.taskArchive(projectId, taskId), { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ archived } satisfies TaskArchiveUpdate) }),
   setTaskType: (projectId: string, taskId: string, type: TaskType | null) =>
     request<TaskTypeUpdate>(P.taskType(projectId, taskId), { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ type } satisfies TaskTypeUpdate) }),
   task: (projectId: string, taskId: string, sessionId?: string | null) =>

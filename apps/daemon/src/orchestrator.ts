@@ -44,7 +44,7 @@ import type { Store, StoredMessage } from "@nightshift/store";
 import { applyProjectUpdate, buildContext, seedProjectFromConfig, validateNewProject, type ProjectContext } from "./projects.ts";
 import { OnboardingService, type Summarize } from "./onboarding/service.ts";
 import { inspectRepository } from "./onboarding/inspect.ts";
-import type { ProjectUpdate, ScaffoldInput } from "@nightshift/core";
+import type { ContinuablePr, ProjectFolderStatus, ProjectUpdate, ScaffoldInput } from "@nightshift/core";
 import { WorkspaceService } from "./workspace/service.ts";
 import { SHARED } from "./workspace/preview.ts";
 import { VerificationLog } from "./verification/log.ts";
@@ -104,6 +104,8 @@ export type OrchestratorDeps = {
   modelLabel: string;
   log?: (line: string) => void;
 };
+
+const ARCHIVED_NO_MESSAGE = "This task is archived. Unarchive it to send the agent a message.";
 
 export class Orchestrator {
   readonly emitter = new EventEmitter();
@@ -205,6 +207,42 @@ export class Orchestrator {
     return { type: this.taskTypeOf(projectId, taskId) };
   }
 
+  archivedAt(projectId: string, taskId: string): string | null {
+    return this.store.setting<string | null>(`archived:${projectId}/${taskId}`, null);
+  }
+
+  /**
+   * Archives a task the owner no longer wants in the list (stale, abandoned), or brings it back. Archiving ends a run
+   * that is still going or waiting on its PR without touching the task in its source (no comment, no status change):
+   * the agent and testers stop, decisions close, the lease is released; the worktree, branch and PR stay.
+   */
+  async setArchived(projectId: string, taskId: string, archived: boolean): Promise<{ archivedAt: string | null; effect: string }> {
+    this.ctx(projectId);
+    const key = `archived:${projectId}/${taskId}`;
+    const run = this.store.latestRunForTask(projectId, taskId);
+    if (!archived) {
+      this.store.setSetting(key, null);
+      if (run) this.event(run.id, "info", "Unarchived by the owner");
+      this.touchTask(projectId, taskId);
+      return { archivedAt: null, effect: "The task is back in the list." };
+    }
+    if (this.archivedAt(projectId, taskId)) return { archivedAt: this.archivedAt(projectId, taskId), effect: "The task is already archived." };
+    let effect = "Archived. It is hidden from the list and no agent picks it up.";
+    if (run && !["done", "failed", "stopped"].includes(run.phase)) {
+      if (run.conversationId && isActivePhase(run.phase)) await this.runner.abort(run.conversationId).catch(() => {});
+      this.stopTestersOf(run.id, "Stopped: the task was archived");
+      for (const d of this.vlog.openDecisions(run.id)) this.vlog.answerDecision(run.id, d.id, "Closed: the task was archived");
+      this.update(run.id, { phase: "stopped", paused: false, slot: null, activity: null });
+      await this.releaseLease(run.id);
+      effect = `Archived. The run was stopped${run.prUrl ? " and its PR is no longer watched (it stays open)" : ""}.`;
+    }
+    const at = new Date().toISOString();
+    this.store.setSetting(key, at);
+    if (run) this.event(run.id, "info", "Archived by the owner");
+    this.touchTask(projectId, taskId);
+    return { archivedAt: at, effect };
+  }
+
   taskGuide(projectId: string, taskId: string): string | undefined {
     const info = taskTypeInfo(this.taskTypeOf(projectId, taskId));
     if (!info) return undefined;
@@ -219,7 +257,96 @@ export class Orchestrator {
   }
 
   private taskMeta(projectId: string, taskId: string) {
-    return this.store.setting<{ origin?: TaskOrigin; continueBranch?: string; startFrom?: string } | null>(`taskMeta:${projectId}/${taskId}`, null);
+    return this.store.setting<{ origin?: TaskOrigin; continueBranch?: string; startFrom?: string; folder?: { branch: string } } | null>(`taskMeta:${projectId}/${taskId}`, null);
+  }
+
+  /** True when the run works in the owner's project folder instead of its own worktree. */
+  private inFolder(run: { projectId: string; worktree: string }) {
+    const project = this.projects.get(run.projectId)?.project ?? this.store.getProject(run.projectId);
+    return Boolean(project) && path.resolve(run.worktree) === path.resolve(project!.repo.path);
+  }
+
+  /** The project folder's git state, for a task that works there instead of in a worktree. */
+  async folderStatus(projectId: string): Promise<ProjectFolderStatus> {
+    const ctx = this.ctx(projectId);
+    const { path: dir, baseBranch, branchPrefix } = ctx.project.repo;
+    const git = (args: string[]) => exec("git", args, { cwd: dir });
+    const branch = (await git(["symbolic-ref", "--quiet", "--short", "HEAD"])).stdout.trim() || null;
+    const changes = (await git(["status", "--porcelain"])).stdout.split("\n").filter((l) => l.trim());
+    const busy = this.store.runsForProject(projectId).find((r) => this.inFolder(r) && !["done", "failed", "stopped"].includes(r.phase));
+    const pushed = branch ? Boolean(await ctx.workspaces.remoteHead(branch).catch(() => null)) : false;
+    const pr = branch && pushed ? await ctx.prHost.findOpen(branch).catch(() => null) : null;
+    const onBase = branch === baseBranch;
+    return {
+      path: dir,
+      branch,
+      onBase,
+      prefixed: Boolean(branch?.startsWith(branchPrefix)),
+      pushed,
+      changes: changes.slice(0, 20),
+      changeCount: changes.length,
+      pr: pr ? { number: pr.number, url: pr.url } : null,
+      busyTask: busy?.taskId ?? null,
+      blocked: !branch
+        ? "The project folder is not on a branch (detached HEAD). Check out the branch to work on."
+        : onBase
+          ? `The project folder is on ${baseBranch}, the base branch; agents never commit to it. Check out your feature branch first.`
+          : busy
+            ? `${busy.taskId} is already working in the project folder.`
+            : null,
+    };
+  }
+
+  /** Open pull requests a task can continue on their own branch, each with why it cannot right now. */
+  async continuablePrs(projectId: string): Promise<ContinuablePr[]> {
+    const ctx = this.ctx(projectId);
+    const prs = await ctx.prHost.listOpen();
+    // git checks out a branch in one place only: the folder or another worktree that holds it blocks a new worktree.
+    const held = new Map<string, string>();
+    let where = "";
+    for (const line of (await exec("git", ["worktree", "list", "--porcelain"], { cwd: ctx.project.repo.path })).stdout.split("\n")) {
+      if (line.startsWith("worktree ")) where = line.slice(9);
+      else if (line.startsWith("branch refs/heads/")) held.set(line.slice(18), where);
+    }
+    const folder = path.resolve(ctx.project.repo.path);
+    const git = (args: string[]) => exec("git", args, { cwd: ctx.project.repo.path, timeoutMs: 60_000, env: { GIT_TERMINAL_PROMPT: "0" } });
+    // The worktree resets a local branch of the same name to the PR's head: local commits not on the PR would be lost.
+    const unpushed = new Map<string, number>();
+    for (const pr of prs) {
+      if ((await git(["rev-parse", "--verify", "--quiet", `refs/heads/${pr.branch}`])).code !== 0) continue;
+      await git(["fetch", "--quiet", ctx.project.repo.remote, `+${pr.branch}:refs/remotes/${ctx.project.repo.remote}/${pr.branch}`]);
+      const n = Number((await git(["rev-list", "--count", `refs/remotes/${ctx.project.repo.remote}/${pr.branch}..refs/heads/${pr.branch}`])).stdout.trim()) || 0;
+      if (n) unpushed.set(pr.branch, n);
+    }
+    return prs.map((pr) => {
+      const active = this.store.runsForProject(projectId).find((r) => r.branch === pr.branch && !["done", "failed", "stopped"].includes(r.phase));
+      const at = held.get(pr.branch);
+      const ahead = unpushed.get(pr.branch);
+      return {
+        number: pr.number,
+        url: pr.url,
+        title: pr.title ?? null,
+        branch: pr.branch,
+        base: pr.base,
+        prefixed: pr.branch.startsWith(ctx.project.repo.branchPrefix),
+        blocked: active
+          ? `${active.taskId} is already working on it.`
+          : at && path.resolve(at) === folder
+            ? `${pr.branch} is checked out in your project folder. Switch the folder to another branch first, or choose "My project folder".`
+            : at && !this.store.runsForProject(projectId).some((r) => path.resolve(r.worktree) === path.resolve(at))
+              ? `${pr.branch} is checked out in ${at}.`
+              : ahead
+                ? `Your local ${pr.branch} has ${ahead} commit${ahead === 1 ? "" : "s"} that are not on the pull request. Push ${ahead === 1 ? "it" : "them"} first, so the agent starts from your latest work.`
+                : null,
+      };
+    });
+  }
+
+  /** A folder task stops rather than commit to a branch the owner switched to. */
+  private async assertFolderBranch(run: Run) {
+    if (!this.inFolder(run)) return;
+    const now = (await exec("git", ["symbolic-ref", "--quiet", "--short", "HEAD"], { cwd: run.worktree })).stdout.trim();
+    if (now !== run.branch) throw new Error(`Your project folder is now on ${now || "a detached HEAD"}, but this task works on ${run.branch}. Check out ${run.branch} in the folder, then retry the task.`);
   }
 
   originOf(projectId: string, taskId: string): TaskOrigin {
@@ -469,6 +596,14 @@ export class Orchestrator {
           attachmentIds: [],
         }),
       };
+    }
+    if (decision.kind === "folder") {
+      if (/^stop/i.test(text)) {
+        await this.control(run.id, "stop");
+        return { decision, effect: "The task was stopped. Your folder was not changed." };
+      }
+      this.store.setSetting(`folderChangesOk:${run.id}`, true);
+      return { decision, effect: this.resumePreparing(run) };
     }
     if (decision.kind === "tester") {
       if (/^stop/i.test(text)) {
@@ -1143,7 +1278,8 @@ export class Orchestrator {
     if (opts.removeWorkspaces) {
       for (const taskId of taskIds) await this.workspace.databases.drop(ctx.project, taskId).catch(() => {});
       await this.workspace.databases.removeServer(id).catch(() => {});
-      for (const worktree of new Set(runs.map((r) => r.worktree).filter(Boolean))) {
+      // Never the owner's own folder: tasks that worked there have no worktree of their own.
+      for (const worktree of new Set(runs.map((r) => r.worktree).filter((w) => w && path.resolve(w) !== path.resolve(ctx.project.repo.path)))) {
         await ctx.workspaces.remove(worktree).catch(() => {});
         removedWorkspaces++;
       }
@@ -1369,13 +1505,20 @@ export class Orchestrator {
       for (const ref of refs) {
         const slot = this.freeSlot();
         if (slot === null) return;
+        if (this.archivedAt(ctx.project.id, ref.id)) continue;
         const latest = this.store.latestRunForTask(ctx.project.id, ref.id);
         if (latest && !["failed", "stopped", "done"].includes(latest.phase)) continue;
         const lease = await ctx.source.claim(ref.id).catch(() => null);
         if (!lease) continue;
         const task = await ctx.source.getTask(ref.id);
-        const meta = this.store.setting<{ continueBranch?: string } | null>(`taskMeta:${ctx.project.id}/${task.id}`, null);
+        const meta = this.taskMeta(ctx.project.id, task.id);
+        // One task at a time in the owner's folder: a second folder task waits for the first to finish.
+        if (meta?.folder && this.store.runsForProject(ctx.project.id).some((r) => r.taskId !== task.id && this.inFolder(r) && !["done", "failed", "stopped"].includes(r.phase))) {
+          await ctx.source.release(lease).catch(() => {});
+          continue;
+        }
         const branch =
+          meta?.folder?.branch ??
           meta?.continueBranch ??
           (latest && latest.phase !== "done" ? latest.branch : `${ctx.project.repo.branchPrefix}${slugify(task.id)}-${slugify(task.title)}${latest ? `-${Date.now().toString(36)}` : ""}`);
         const run = this.store.createRun({
@@ -1387,7 +1530,7 @@ export class Orchestrator {
           source: ctx.source.name,
           slot,
           branch,
-          worktree: ctx.workspaces.pathFor(task.id),
+          worktree: meta?.folder ? ctx.project.repo.path : ctx.workspaces.pathFor(task.id),
           model: this.label(this.modelFor(ctx.project)),
           leaseId: lease.leaseId,
           leaseExpiresAt: lease.expiresAt,
@@ -1511,8 +1654,28 @@ export class Orchestrator {
         return true;
       }
       case "preparing": {
-        const dir = await ctx.workspaces.ensure(run.taskId, run.branch, this.baseOf(run), this.taskMeta(run.projectId, run.taskId)?.startFrom);
-        if (ctx.project.localFiles?.paths.length) {
+        const folder = this.inFolder(run);
+        if (folder) {
+          await this.assertFolderBranch(run);
+          // The agent's commits would take the owner's uncommitted work with them: ask first.
+          const changes = (await exec("git", ["status", "--porcelain"], { cwd: run.worktree })).stdout.split("\n").filter((l) => l.trim());
+          if (changes.length && !this.store.setting<boolean>(`folderChangesOk:${run.id}`, false)) {
+            this.vlog.addDecision(run.id, {
+              kind: "folder",
+              question: `Your project folder has ${changes.length} uncommitted change${changes.length === 1 ? "" : "s"} on ${run.branch}. The agent's commits would include ${changes.length === 1 ? "it" : "them"}. Go on?`,
+              context: changes.slice(0, 40).join("\n"),
+              options: ["Include them in the agent's work", "Stop the task"],
+              source: "Nightshift",
+            });
+            await this.pauseForDecisions(run);
+            return false;
+          }
+        }
+        const dir = folder ? run.worktree : await ctx.workspaces.ensure(run.taskId, run.branch, this.baseOf(run), this.taskMeta(run.projectId, run.taskId)?.startFrom);
+        const existing = folder || Boolean(this.taskMeta(run.projectId, run.taskId)?.continueBranch);
+        if (existing && !this.store.setting<string | null>(`startHead:${run.id}`, null))
+          this.store.setSetting(`startHead:${run.id}`, (await exec("git", ["rev-parse", "HEAD"], { cwd: dir })).stdout.trim());
+        if (ctx.project.localFiles?.paths.length && !folder) {
           const local = syncLocalFiles(ctx.project.repo.path, dir, ctx.project.localFiles, false);
           if (local.copied.length) {
             this.store.setSetting(`localFilesSynced:${run.projectId}/${run.taskId}`, new Date().toISOString());
@@ -1521,7 +1684,8 @@ export class Orchestrator {
           if (local.missing.length) this.event(run.id, "info", `Local files not in the project folder: ${local.missing.join(", ")}`);
         }
         const setup = ctx.project.repo.setup;
-        if (setup && !this.store.setting<boolean>(`setupSkip:${run.id}`, false) && !this.store.sideEffect(`setup:${run.id}`)) {
+        // The owner's own folder is already set up the way they work in it.
+        if (setup && !folder && !this.store.setting<boolean>(`setupSkip:${run.id}`, false) && !this.store.sideEffect(`setup:${run.id}`)) {
           this.event(run.id, "info", `Setup: ${setup}`);
           this.update(run.id, { worktree: dir, activity: "Setting up the workspace" });
           const step = this.vlog.startStep(run.id, "setup", "Set up the workspace", setup);
@@ -1736,7 +1900,9 @@ export class Orchestrator {
         return this.verify(run);
       }
       case "pushing": {
-        if ((ctx.project.pushMode ?? "auto") === "approve" && !(await this.pushApproved(run))) return false;
+        // A branch outside the agent prefix is the owner's (a continued PR or their folder): every push asks first (D44, D45).
+        const mustAsk = (ctx.project.pushMode ?? "auto") === "approve" || !run.branch.startsWith(ctx.project.repo.branchPrefix);
+        if (mustAsk && !(await this.pushApproved(run))) return false;
         await this.pushAndOpenPr(run);
         return false;
       }
@@ -1802,8 +1968,11 @@ export class Orchestrator {
       `${run.id}:review:${round}`,
     );
     this.store.recordModelUsage(run.id, await this.runner.usage(reviewer), "review");
-    await exec("git", ["reset", "--hard", "--quiet", "HEAD"], { cwd: run.worktree });
-    await exec("git", ["clean", "-fdq"], { cwd: run.worktree });
+    // Undo anything the reviewer left behind, but never in the owner's own folder (its untracked files are theirs).
+    if (!this.inFolder(run)) {
+      await exec("git", ["reset", "--hard", "--quiet", "HEAD"], { cwd: run.worktree });
+      await exec("git", ["clean", "-fdq"], { cwd: run.worktree });
+    }
     this.store.setSetting(`reviewRound:${run.id}`, round);
     const after = this.store.getRun(run.id)!;
     if (after.paused || !isActivePhase(after.phase)) {
@@ -2071,8 +2240,14 @@ export class Orchestrator {
   private async verify(run: Run): Promise<boolean> {
     const ctx = this.runCtx(run);
     const summary = this.store.setting<string | null>(`summary:${run.id}`, null);
-    const commits = this.store.setting<number>(`pushRound:${run.id}`, 0) + (await ctx.workspaces.aheadOfBase(run.worktree, this.baseOf(run)));
+    // A branch that existed before the task (the owner's folder, a continued PR) already has commits; only the agent's own count.
+    const startHead = this.store.setting<string | null>(`startHead:${run.id}`, null);
+    const ahead = startHead
+      ? Number((await exec("git", ["rev-list", "--count", `${startHead}..HEAD`], { cwd: run.worktree })).stdout.trim()) || 0
+      : await ctx.workspaces.aheadOfBase(run.worktree, this.baseOf(run));
+    const commits = this.store.setting<number>(`pushRound:${run.id}`, 0) + ahead;
     const subject = commits === 0 ? `${run.taskId}: ${run.taskTitle}` : `${run.taskId}: address findings (round ${this.vlog.round(run.id)})`;
+    await this.assertFolderBranch(run);
     await ctx.workspaces.commitAll(run.worktree, `${subject}\n\n${summary ?? ""}`.trim());
     const testers = (ctx.project.testers ?? []).filter((t) => t.enabled);
     const handle = async (blocking: Issue[], decisions: Decision[]): Promise<boolean | null> => {
@@ -2168,6 +2343,7 @@ export class Orchestrator {
   }
 
   private async commitWork(run: Run): Promise<string | null> {
+    await this.assertFolderBranch(run);
     const ws = this.runCtx(run).workspaces;
     const summary = this.store.setting<string | null>(`summary:${run.id}`, null);
     const round = this.store.setting<number>(`commitRound:${run.id}`, this.store.setting<number>(`pushRound:${run.id}`, 0));
@@ -2222,7 +2398,18 @@ export class Orchestrator {
     const round = this.store.setting<number>(`pushRound:${run.id}`, 0);
     await this.commitWork(run);
     if ((await ws.aheadOfBase(run.worktree, this.baseOf(run))) === 0) throw new Error("The agent finished without changing any files");
-    const { pushed, sha } = await ws.push(run.worktree, run.branch);
+    // Never force-push the owner's branches (their folder, or a PR started outside Nightshift): the remote may have commits we lack.
+    const folder = this.inFolder(run);
+    const owners = folder || !run.branch.startsWith(ctx.project.repo.branchPrefix);
+    const { pushed, sha } = await ws.push(run.worktree, run.branch, { force: !owners }).catch((error: Error) => {
+      if (owners && /rejected|fetch first|non-fast-forward/i.test(error.message))
+        throw new Error(
+          folder
+            ? `${run.branch} has commits on ${ctx.project.repo.remote} that your project folder does not have. Run git pull in the folder, then retry the task.`
+            : `${run.branch} has new commits on ${ctx.project.repo.remote} that this task's workspace does not have. Pull base or retry the task to start from them.`,
+        );
+      throw error;
+    });
     this.store.setSetting(`pushRound:${run.id}`, round + 1);
     this.event(run.id, "pr", pushed ? `Pushed ${sha.slice(0, 8)}` : `Branch already at ${sha.slice(0, 8)}`);
     if (pushed || !this.store.setting<number | null>(`pushedAt:${run.id}`, null)) this.store.setSetting(`pushedAt:${run.id}`, Date.now());
@@ -2571,6 +2758,7 @@ export class Orchestrator {
       return updated;
     }
     if (!["failed", "stopped"].includes(run.phase)) throw new Error("only failed or stopped runs can be retried");
+    if (this.archivedAt(run.projectId, run.taskId)) throw new Error("the task is archived; unarchive it first");
     await this.setTaskStatus(runId, "ready_for_ai", `:retry:${Date.now()}`);
     this.event(runId, "info", "Retry requested: the task is back in Ready for AI");
     this.lastTaskPoll = 0;
@@ -2602,6 +2790,7 @@ export class Orchestrator {
     const clean = text.trim();
     const ids = attachmentIds.filter((id) => this.store.attachment(id));
     if (!clean && !ids.length) throw new Error("Write a message or attach a picture");
+    if (this.archivedAt(projectId, taskId)) throw Object.assign(new Error(ARCHIVED_NO_MESSAGE), { status: 409 });
     const task = await ctx.source.getTask(taskId);
     const run = this.store.latestRunForTask(projectId, taskId);
     const can = this.messageEffect(run, task.status);
@@ -2668,15 +2857,21 @@ export class Orchestrator {
       if (this.store.localTaskIdTaken(projectId, customId) || this.store.runsForProject(projectId).some((r) => r.taskId.toLowerCase() === customId.toLowerCase()))
         throw Object.assign(new Error(`This project already has a task ${customId}`), { status: 409 });
     }
-    const startFrom = input.type === "review" ? input.startFrom?.trim() : undefined;
-    if (input.type === "review") {
+    const folder = input.workIn === "folder" ? await this.folderStatus(projectId) : null;
+    if (folder?.blocked) throw Object.assign(new Error(folder.blocked), { status: 409 });
+    const continuing = input.workIn === "pr" ? (await this.continuablePrs(projectId)).find((p) => p.number === Number(input.pr)) : null;
+    if (input.workIn === "pr" && !continuing) throw Object.assign(new Error(`There is no open pull request #${input.pr}`), { status: 404 });
+    if (continuing?.blocked) throw Object.assign(new Error(continuing.blocked), { status: 409 });
+    const startFrom = input.type === "review" && !folder && !continuing ? input.startFrom?.trim() : undefined;
+    if (input.type === "review" && !folder && !continuing) {
       if (!startFrom) throw new Error("Choose the branch with the work to continue");
       if (startFrom === (base || ctx.project.repo.baseBranch)) throw new Error("Choose the branch with the earlier work, not the base branch");
       if (!(await this.branches(projectId, startFrom)).branches.some((b) => b.name === startFrom)) throw new Error(`Branch ${startFrom} was not found on ${ctx.project.repo.remote}`);
       if (this.activeTaskForBranch(projectId, startFrom)) throw new Error(`Another task is still working on ${startFrom}; stop it or wait until it is done`);
     }
     const task = await ctx.source.createTask({ title, body: input.body?.trim() ?? "", ...(customId ? { id: customId } : {}) });
-    if (base && base !== ctx.project.repo.baseBranch) this.store.setSetting(`taskBase:${projectId}/${task.id}`, base);
+    const targetBase = continuing ? continuing.base : base;
+    if (targetBase && targetBase !== ctx.project.repo.baseBranch) this.store.setSetting(`taskBase:${projectId}/${task.id}`, targetBase);
     // Agents push only to branches under the project's prefix (D6): another prefix gets its own agent branch, started from it.
     if (startFrom && !meta) {
       this.store.setSetting(
@@ -2685,6 +2880,9 @@ export class Orchestrator {
       );
     }
     if (meta) this.store.setSetting(`taskMeta:${projectId}/${task.id}`, meta);
+    else if (continuing)
+      this.store.setSetting(`taskMeta:${projectId}/${task.id}`, { origin: { kind: "manual", ref: `PR #${continuing.number}`, url: continuing.url, branch: continuing.branch }, continueBranch: continuing.branch });
+    else if (folder?.branch) this.store.setSetting(`taskMeta:${projectId}/${task.id}`, { origin: { kind: "manual", branch: folder.branch }, folder: { branch: folder.branch } });
     if (input.type !== undefined && input.type !== null) {
       if (!isTaskType(input.type)) throw new Error("Unknown task type");
       this.store.setSetting(`taskType:${projectId}/${task.id}`, input.type);
@@ -2710,6 +2908,8 @@ export class Orchestrator {
       origin: this.originOf(projectId, t.id),
       type: this.taskTypeOf(projectId, t.id),
       preview: this.previewSummary(projectId, t.id),
+      archivedAt: this.archivedAt(projectId, t.id),
+      inProjectFolder: run ? this.inFolder(run) : Boolean(this.taskMeta(projectId, t.id)?.folder),
       openDecisions: run ? this.vlog.openDecisions(run.id).length : 0,
       openIssues: run ? this.vlog.openIssues(run.id).length : 0,
       run: run
@@ -2745,7 +2945,7 @@ export class Orchestrator {
   async projectSummary(ctx: ProjectContext): Promise<ProjectSummary> {
     const tasks = await this.listTasksCached(ctx);
     const taskCounts: ProjectSummary["taskCounts"] = {};
-    for (const t of tasks) taskCounts[t.status] = (taskCounts[t.status] ?? 0) + 1;
+    for (const t of tasks) if (!this.archivedAt(ctx.project.id, t.id)) taskCounts[t.status] = (taskCounts[t.status] ?? 0) + 1;
     const activeRuns = this.store.runsForProject(ctx.project.id).filter((r) => isActivePhase(r.phase)).length;
     const openDecisions = this.store.runsForProject(ctx.project.id).reduce((n, r) => n + (["done", "stopped"].includes(r.phase) ? 0 : this.vlog.openDecisions(r.id).length), 0);
     return { ...ctx.project, taskCounts, activeRuns, openDecisions, sourceError: ctx.state.lastError, commitAuthor: commitAuthor(this.config, ctx.project.repo.path) };
@@ -2794,7 +2994,8 @@ export class Orchestrator {
       events: run ? this.store.listEvents(run.id, 300) : [],
       messages,
       attachments: messages.flatMap((m) => m.attachments),
-      canMessage: this.messageEffect(run, task.status),
+      canMessage: this.archivedAt(projectId, taskId) ? { allowed: false, effect: ARCHIVED_NO_MESSAGE } : this.messageEffect(run, task.status),
+      archivedAt: this.archivedAt(projectId, taskId),
     };
   }
 

@@ -298,6 +298,7 @@ export class WorkspaceService {
     if (!project.localFiles?.paths.length) throw new WorkspaceError("No local files are selected for this project. Choose them under Local files in the project settings.", 400);
     const root = this.ops(projectId, taskId).root;
     if (overwrite) this.editable(projectId, taskId);
+    if (path.resolve(root) === path.resolve(project.repo.path)) throw new WorkspaceError("This task works in the project folder itself, so its local files are already there.", 400);
     const result = syncLocalFiles(project.repo.path, root, project.localFiles, overwrite);
     if (result.copied.length) this.deps.store.setSetting(`localFilesSynced:${projectId}/${taskId}`, new Date().toISOString());
     this.deps.onChange(projectId, taskId);

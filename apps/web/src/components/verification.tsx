@@ -153,6 +153,7 @@ const DECISION_KINDS: Record<Decision["kind"], string> = {
   push: "Approve the push",
   setup: "Workspace setup failed",
   tester: "A required test could not run",
+  folder: "Your project folder has uncommitted changes",
   "pr-comment": "Approve a comment on the pull request",
 };
 
@@ -199,7 +200,7 @@ function DecisionCard({ projectId, taskId, decision, onAnswered }: { projectId: 
           <Collapsible defaultOpen={PLAIN_CONTEXT.has(decision.kind)} className="group/ctx rounded-md border bg-background/60">
             <CollapsibleTrigger className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs font-medium text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50">
               <ChevronRight className="size-3.5 transition-transform group-data-[state=open]/ctx:rotate-90" />
-              {decision.kind === "push" ? "What will be pushed" : decision.kind === "pr-comment" ? "What will be posted" : decision.kind === "setup" || decision.kind === "tester" ? "What went wrong" : "Context"}
+              {decision.kind === "push" ? "What will be pushed" : decision.kind === "pr-comment" ? "What will be posted" : decision.kind === "setup" || decision.kind === "tester" ? "What went wrong" : decision.kind === "folder" ? "Uncommitted changes" : "Context"}
             </CollapsibleTrigger>
             <CollapsibleContent className="border-t px-3 py-2 text-sm">
               {PLAIN_CONTEXT.has(decision.kind) ? (

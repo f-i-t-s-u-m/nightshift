@@ -40,7 +40,7 @@ export class LocalPrHost implements PrHost {
 
   async listOpen(): Promise<OpenPr[]> {
     const out: OpenPr[] = [];
-    for (const p of this.read().filter((x) => x.state === "open")) out.push({ number: p.number, url: `local://pr/${p.number}`, branch: p.branch, base: p.base, headSha: await this.remoteHead(p.branch) });
+    for (const p of this.read().filter((x) => x.state === "open")) out.push({ number: p.number, url: `local://pr/${p.number}`, branch: p.branch, base: p.base, headSha: await this.remoteHead(p.branch), title: p.title });
     return out;
   }
 

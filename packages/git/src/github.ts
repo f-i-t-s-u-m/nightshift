@@ -37,13 +37,14 @@ export class GithubPrHost implements PrHost {
   }
 
   async listOpen(): Promise<OpenPr[]> {
-    const out = await this.gh(["pr", "list", "--state", "open", "--limit", "100", "--json", "number,url,headRefName,baseRefName,headRefOid"]);
-    return (JSON.parse(out) as Array<{ number: number; url: string; headRefName: string; baseRefName: string; headRefOid: string }>).map((p) => ({
+    const out = await this.gh(["pr", "list", "--state", "open", "--limit", "100", "--json", "number,url,headRefName,baseRefName,headRefOid,title"]);
+    return (JSON.parse(out) as Array<{ number: number; url: string; headRefName: string; baseRefName: string; headRefOid: string; title: string }>).map((p) => ({
       number: p.number,
       url: p.url,
       branch: p.headRefName,
       base: p.baseRefName,
       headSha: p.headRefOid,
+      title: p.title,
     }));
   }
 

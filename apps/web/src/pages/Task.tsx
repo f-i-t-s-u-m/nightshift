@@ -1,5 +1,7 @@
 import { Suspense, lazy, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import {
+  Archive,
+  ArchiveRestore,
   ChevronDown,
   ChevronRight,
   CircleAlert,
@@ -510,6 +512,55 @@ function RunControls({ run, onDone }: { run: Run; onDone: () => Promise<void> })
   );
 }
 
+/** Archive (or unarchive) the task; a run that is still going or waiting on its PR stops, so that asks first. */
+function ArchiveControl({ projectId, taskId, run, archivedAt, onDone }: { projectId: string; taskId: string; run: Run | null; archivedAt: string | null; onDone: () => Promise<void> }) {
+  const [busy, setBusy] = useState(false);
+  const [confirm, setConfirm] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const live = run !== null && !["done", "failed", "stopped"].includes(run.phase);
+  const apply = async (archived: boolean) => {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.setTaskArchived(projectId, taskId, archived);
+      await onDone();
+    } catch (err) {
+      setError(`Could not ${archived ? "archive" : "unarchive"}: ${messageOf(err)}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <>
+      <Button size="sm" variant="outline" disabled={busy} aria-busy={busy} onClick={() => (archivedAt ? void apply(false) : live ? setConfirm(true) : void apply(true))}>
+        {busy ? <Spinner className="size-3" /> : archivedAt ? <ArchiveRestore /> : <Archive />}
+        {archivedAt ? "Unarchive" : "Archive"}
+      </Button>
+      {error ? (
+        <span className="text-xs text-destructive" role="alert">
+          {error}
+        </span>
+      ) : null}
+      <AlertDialog open={confirm} onOpenChange={setConfirm}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Archive this task?</AlertDialogTitle>
+            <AlertDialogDescription>
+              {run && isActive(run.phase) ? "The agent is working on it and stops now. " : null}
+              Its testers stop, open decisions close{run?.prUrl ? ", and its pull request is no longer watched (it stays open on GitHub)" : ""}. The task is hidden from the list and no agent
+              picks it up. Nothing changes on the task itself, and the worktree and branch stay. Unarchive it to bring it back.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={() => void apply(true)}>Archive</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </>
+  );
+}
+
 function Composer({
   view,
   awaitingApproval,
@@ -985,7 +1036,8 @@ export function TaskPage({ projectId, taskId }: { projectId: string; taskId: str
                 </a>
               </Button>
             ) : null}
-            {run ? <RunControls run={run} onDone={load} /> : null}
+            {run && !view.archivedAt ? <RunControls run={run} onDone={load} /> : null}
+            <ArchiveControl projectId={projectId} taskId={taskId} run={run} archivedAt={view.archivedAt} onDone={load} />
             {tab === "conversation" ? (
               <Tooltip>
                 <TooltipTrigger asChild>
@@ -1002,6 +1054,11 @@ export function TaskPage({ projectId, taskId }: { projectId: string; taskId: str
           <StatusPill status={task.status} />
           <TaskTypeMenu projectId={projectId} taskId={taskId} type={view.type} runActive={runActive} onChanged={(type) => setView((v) => (v ? { ...v, type } : v))} />
           {run && (run.phase !== task.status || run.paused) ? <PhaseBadge phase={run.phase} paused={run.paused} /> : null}
+          {view.archivedAt ? (
+            <span className="inline-flex items-center gap-1 rounded-md bg-muted px-1.5 py-px font-medium" title={`Archived ${formatDateTime(view.archivedAt)}`}>
+              <Archive className="size-3" /> Archived
+            </span>
+          ) : null}
           {decisionCount > 0 ? (
             <button type="button" className="rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50" onClick={() => selectTab("checks")}>
               <DecisionCount count={decisionCount} className="hover:bg-violet-500/25" />

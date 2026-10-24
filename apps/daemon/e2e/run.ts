@@ -973,6 +973,38 @@ try {
     return `issue major feature.js:2, step ${step.status} "${step.detail?.slice(0, 40)}…", no decision asked; ${before.run!.phase} → fixing → ${after.run!.phase}`;
   });
 
+  await check("Archiving a stale task stops its run quietly, hides it from the counts and keeps agents and messages off it; unarchiving brings it back", async () => {
+    const task = await get<TaskViewResponse>("/api/projects/quality/tasks/T-1");
+    if (!task.run || !["waiting_ci", "ready_for_review"].includes(task.run.phase)) throw new Error(`T-1 is ${task.run?.phase}`);
+    const commentsBefore = task.comments.length;
+    const statusBefore = task.task.status;
+    const put = async (archived: boolean) =>
+      (await (await fetch(`${base}/api/projects/quality/tasks/T-1/archive`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ archived }) })).json()) as { archivedAt: string | null; effect: string };
+    const res = await put(true);
+    if (!res.archivedAt || !/stopped/.test(res.effect)) throw new Error(JSON.stringify(res));
+    const after = await get<TaskViewResponse>("/api/projects/quality/tasks/T-1");
+    const list = await get<{ tasks: Array<{ id: string; archivedAt: string | null }>; project: { taskCounts: Record<string, number> } }>("/api/projects/quality/tasks");
+    const counted = Object.values(list.project.taskCounts).reduce((a, b) => a + b, 0);
+    const message = await post<{ error?: string }>("/api/projects/quality/tasks/T-1/messages", { text: "one more thing" });
+    const retry = await post<{ error?: string }>(`/api/runs/${after.run!.id}/retry`);
+    if (
+      after.run?.phase !== "stopped" ||
+      after.archivedAt !== res.archivedAt ||
+      after.canMessage.allowed ||
+      after.comments.length !== commentsBefore ||
+      after.task.status !== statusBefore ||
+      !list.tasks.find((t) => t.id === "T-1")?.archivedAt ||
+      counted !== list.tasks.filter((t) => !t.archivedAt).length ||
+      !/archived/.test(message.error ?? "") ||
+      !/archived/.test(retry.error ?? "")
+    )
+      throw new Error(JSON.stringify({ phase: after.run?.phase, archivedAt: after.archivedAt, canMessage: after.canMessage, comments: after.comments.length, status: after.task.status, counted, message, retry }));
+    const back = await put(false);
+    const restored = await get<TaskViewResponse>("/api/projects/quality/tasks/T-1");
+    if (back.archivedAt !== null || restored.archivedAt !== null || !restored.canMessage.allowed) throw new Error(JSON.stringify({ back, restored: restored.canMessage }));
+    return `"${res.effect}"; ${task.run.phase} → stopped, task stays ${statusBefore} with no new comment, left out of the counts; message and retry refused; unarchived → messages allowed again`;
+  });
+
   await check("Feedback on an open agent PR without a running task creates a task on that branch; the listener can be turned off", async () => {
     const other = path.join(root, "web-orphan");
     execFileSync("git", ["clone", "-q", second.origin, other]);
@@ -2260,6 +2292,89 @@ try {
     const steps = (await get<VerificationResponse>("/api/projects/gate/tasks/T-2/verification")).steps.filter((x) => x.testerId === "gatekeeper");
     if (steps.at(-1)?.status !== "skipped" || steps.at(-1)?.detail !== "Skipped by you for this change") throw new Error(JSON.stringify(steps));
     return `T-1 held without a PR ("${first.question.slice(0, 50)}…"), asked again while still down, PR #${pr1} once it ran; T-2 skipped for this change → PR #${pr2}, step "Skipped by you for this change"`;
+  });
+
+  await check("A task can work in the project folder on its checked-out branch: asks about uncommitted work, asks before pushing to the owner's branch, no worktree", async () => {
+    type Folder = { branch: string | null; onBase: boolean; prefixed: boolean; pushed: boolean; changeCount: number; pr: { number: number } | null; busyTask: string | null; blocked: string | null };
+    const createRaw = (body: unknown) => fetch(`${base}/api/projects/website/tasks`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const onMain = await get<Folder>("/api/projects/website/folder");
+    const refused = await createRaw({ title: "Folder on main", body: "x", workIn: "folder" });
+    if (!onMain.onBase || !onMain.blocked || refused.status === 200) throw new Error(JSON.stringify({ onMain, refused: refused.status }));
+    sh(second.repo, "checkout", "-q", "-b", "feature/owner-work");
+    writeFileSync(path.join(second.repo, "OWNER.md"), "the owner's own work\n");
+    sh(second.repo, "add", "OWNER.md");
+    sh(second.repo, "-c", "user.name=Owner", "-c", "user.email=owner@local", "commit", "-qm", "owner work");
+    sh(second.repo, "push", "-q", "-u", "origin", "feature/owner-work");
+    try {
+      writeFileSync(path.join(second.repo, "wip.txt"), "unfinished\n");
+      const status = await get<Folder>("/api/projects/website/folder");
+      if (status.branch !== "feature/owner-work" || status.prefixed || !status.pushed || status.changeCount !== 1 || status.blocked) throw new Error(JSON.stringify(status));
+      const created = await post<{ task: { id: string } }>("/api/projects/website/tasks", { title: "Folder task", body: "Add a note.", workIn: "folder" });
+      const t = created.task.id;
+      const decisionOf = (kind: string) =>
+        waitFor(`${kind} decision`, async () => (await get<VerificationResponse>(`/api/projects/website/tasks/${t}/verification`)).decisions.find((d) => d.kind === kind && d.status === "open") ?? null, 30_000);
+      const ask = await decisionOf("folder");
+      const run = (await get<{ run: Run }>(`/api/projects/website/tasks/${t}`)).run;
+      if (run.worktree !== second.repo || run.branch !== "feature/owner-work" || !ask.context.includes("wip.txt")) throw new Error(JSON.stringify({ worktree: run.worktree, branch: run.branch, ask }));
+      await post(`/api/projects/website/tasks/${t}/decisions/${ask.id}`, { answer: "Include them in the agent's work" });
+      const push = await decisionOf("push");
+      const remoteBefore = sh(second.origin, "rev-parse", "feature/owner-work").trim();
+      const busy = await createRaw({ title: "Second folder task", body: "x", workIn: "folder" });
+      await post(`/api/projects/website/tasks/${t}/decisions/${push.id}`, { answer: push.options[0] });
+      const done = await waitFor("folder PR", async () => {
+        const x = (await get<{ run: Run }>(`/api/projects/website/tasks/${t}`)).run;
+        return x.prNumber ? x : null;
+      }, 30_000);
+      const files = sh(second.origin, "ls-tree", "-r", "--name-only", "feature/owner-work");
+      const log = sh(second.origin, "log", "--format=%s", "-3", "feature/owner-work");
+      const head = sh(second.repo, "symbolic-ref", "--short", "HEAD").trim();
+      const ownWorktree = existsSync(path.join(path.dirname(run.worktree), "..", "workspaces", "website", t));
+      if (busy.status === 200 || !files.includes("wip.txt") || !files.includes("OWNER.md") || !log.includes(`${t}: Folder task`) || head !== "feature/owner-work" || ownWorktree || remoteBefore === sh(second.origin, "rev-parse", "feature/owner-work").trim())
+        throw new Error(JSON.stringify({ busy: busy.status, files, log, head, ownWorktree }));
+      await post(`/api/runs/${done.id}/stop`);
+      return `refused on main; on feature/owner-work with 1 uncommitted file → asked, included; push to the owner's branch waited for approval ("${push.question.slice(0, 40)}…"), then PR #${done.prNumber} on feature/owner-work with OWNER.md, wip.txt and "${t}: Folder task"; a second folder task was refused while it ran; no worktree was created`;
+    } finally {
+      sh(second.repo, "checkout", "-q", "-f", "main");
+      rmSync(path.join(second.repo, "wip.txt"), { force: true });
+    }
+  });
+
+  await check("An open PR started outside Nightshift can be continued on its own branch in a worktree, updating the same PR", async () => {
+    const other = path.join(root, "web-external-pr");
+    execFileSync("git", ["clone", "-q", second.origin, other]);
+    sh(other, "checkout", "-q", "-b", "feature/external-pr");
+    writeFileSync(path.join(other, "EXTERNAL.md"), "started outside Nightshift\n");
+    sh(other, "add", ".");
+    sh(other, "-c", "user.name=Owner", "-c", "user.email=owner@local", "commit", "-qm", "external start");
+    sh(other, "push", "-q", "origin", "feature/external-pr");
+    const prs = new LocalPrHost(path.join(dataDir, "local-prs", "website.json"), second.repo, "origin");
+    const pr = await prs.create({ branch: "feature/external-pr", base: "main", title: "External work", body: "Opened by hand." });
+    type Pull = { number: number; title: string | null; branch: string; prefixed: boolean; blocked: string | null };
+    const pulls = async () => (await get<{ pulls: Pull[] }>("/api/projects/website/pulls")).pulls.find((p) => p.number === pr.number);
+    // A local branch with commits the PR lacks would be reset by the worktree: flagged instead.
+    sh(second.repo, "fetch", "-q", "origin", "feature/external-pr:feature/external-pr");
+    const tree = sh(second.repo, "rev-parse", "feature/external-pr^{tree}").trim();
+    const local = execFileSync("git", ["-c", "user.name=Owner", "-c", "user.email=owner@local", "commit-tree", tree, "-p", "feature/external-pr", "-m", "unpushed"], { cwd: second.repo, encoding: "utf8" }).trim();
+    sh(second.repo, "branch", "-f", "feature/external-pr", local);
+    const flagged = await pulls();
+    sh(second.repo, "branch", "-D", "feature/external-pr");
+    const listed = await pulls();
+    if (!flagged?.blocked?.includes("not on the pull request") || listed?.blocked !== null || listed.prefixed || listed.title !== "External work") throw new Error(JSON.stringify({ flagged, listed }));
+    const created = await post<{ task: { id: string } }>("/api/projects/website/tasks", { title: "Continue external PR", body: "Finish it.", workIn: "pr", pr: pr.number });
+    const t = created.task.id;
+    const push = await waitFor("push approval", async () => (await get<VerificationResponse>(`/api/projects/website/tasks/${t}/verification`)).decisions.find((d) => d.kind === "push" && d.status === "open") ?? null, 30_000);
+    const again = await fetch(`${base}/api/projects/website/tasks`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ title: "Twice", body: "x", workIn: "pr", pr: pr.number }) });
+    await post(`/api/projects/website/tasks/${t}/decisions/${push.id}`, { answer: push.options[0] });
+    const log = await waitFor("agent commit on the PR branch", async () => {
+      const l = sh(second.origin, "log", "--format=%s", "-3", "feature/external-pr");
+      return l.startsWith(`${t}: `) ? l : null;
+    }, 30_000);
+    const done = (await get<{ run: Run }>(`/api/projects/website/tasks/${t}`)).run;
+    const files = sh(second.origin, "ls-tree", "-r", "--name-only", "feature/external-pr");
+    if (again.status === 200 || done.prNumber !== pr.number || done.branch !== "feature/external-pr" || done.worktree === second.repo || !files.includes("EXTERNAL.md") || !log.startsWith(`${t}: Continue external PR`) || !log.includes("external start"))
+      throw new Error(JSON.stringify({ again: again.status, pr: done.prNumber, branch: done.branch, worktree: done.worktree, log }));
+    await post(`/api/runs/${done.id}/stop`);
+    return `PR #${pr.number} listed (flagged while a local branch had an unpushed commit); continued in ${path.basename(done.worktree)} on feature/external-pr, push waited for approval, then the same PR #${done.prNumber} got "${t}: Continue external PR" on top of "external start"; a second task on it was refused`;
   });
 
   await check("Kill switch turns on and off", async () => {

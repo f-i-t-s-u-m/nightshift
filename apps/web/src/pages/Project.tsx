@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useId, useState, type FormEvent } from "react";
-import { ChevronDown, CircleAlert, ExternalLink, GitBranch, GitPullRequest, Inbox, ListFilter, Plus, Radar, Settings, Share2 } from "lucide-react";
+import { Archive, ArchiveRestore, ChevronDown, CircleAlert, ExternalLink, FolderGit2, GitBranch, GitPullRequest, Inbox, ListFilter, Plus, Radar, RefreshCw, Settings, Share2 } from "lucide-react";
 import { toast } from "sonner";
-import { TASK_ID_PATTERN, TASK_TYPES, isTaskType, taskTypeInfo, type PreviewStatus, type ProjectTasksResponse, type TaskListItem, type TaskPreviewSummary, type TaskStatus, type TaskType } from "@nightshift/core";
+import { TASK_ID_PATTERN, TASK_TYPES, isTaskType, taskTypeInfo, type ContinuablePr, type ProjectFolderStatus, type PreviewStatus, type ProjectTasksResponse, type TaskListItem, type TaskPreviewSummary, type TaskStatus, type TaskType } from "@nightshift/core";
 import { formatDateTime, type Tone } from "@nightshift/ui";
 import { Cost } from "../billing";
 import { Button } from "@/components/ui/button";
@@ -19,7 +19,7 @@ import { AttachButton, UploadTray, useUploads } from "../components/attachments"
 import { BranchPicker } from "../components/BranchPicker";
 import { Markdown } from "../components/Markdown";
 import { Notice } from "../components/Notice";
-import { Dot, EmptyState, Page, PageHeader, PhaseBadge, ProjectMeta, StatusPill, TONE_TEXT } from "../components/TaskBits";
+import { Dot, EmptyState, Page, PageHeader, PhaseBadge, ProjectMeta, Spinner, StatusPill, TONE_TEXT } from "../components/TaskBits";
 import { projectSettingsHref, taskHref } from "../routing";
 import { KindIcon } from "../components/projectKinds";
 import { DEFAULT_TASK_TYPE, TaskTypeBadge, TaskTypeIcon, TaskTypePicker } from "../components/taskTypes";
@@ -181,9 +181,31 @@ const withoutShared = (preview: TaskPreviewSummary, shared: Set<string>): TaskPr
   return { ...preview, total: services.length, running: count("running"), starting: count("starting"), failed: count("failed"), services };
 };
 
-function TaskRow({ projectId, task, defaultBranch, shared }: { projectId: string; task: TaskListItem; defaultBranch: string; shared: Set<string> }) {
+function TaskRow({
+  projectId,
+  task,
+  defaultBranch,
+  shared,
+  onArchive,
+}: {
+  projectId: string;
+  task: TaskListItem;
+  defaultBranch: string;
+  shared: Set<string>;
+  onArchive: (task: TaskListItem, archived: boolean) => Promise<void>;
+}) {
   const run = task.run;
   const running = run ? isActive(run.phase) : false;
+  const [archiving, setArchiving] = useState(false);
+  const archived = Boolean(task.archivedAt);
+  const toggleArchive = async () => {
+    setArchiving(true);
+    try {
+      await onArchive(task, !archived);
+    } finally {
+      setArchiving(false);
+    }
+  };
   return (
     <li className={cn("relative flex flex-wrap items-center gap-x-4 gap-y-2 px-4 py-3 transition-colors hover:bg-muted/50", running && "bg-sky-500/[0.03]")}>
       <div className="min-w-0 flex-1 basis-64">
@@ -197,6 +219,11 @@ function TaskRow({ projectId, task, defaultBranch, shared }: { projectId: string
             <span className="inline-flex max-w-56 items-center gap-1 rounded-md border px-1.5 py-px font-mono" title={`Starts from ${task.baseBranch}`}>
               <GitBranch className="size-3 shrink-0" />
               <span className="truncate">from {task.baseBranch}</span>
+            </span>
+          ) : null}
+          {task.inProjectFolder ? (
+            <span className="inline-flex items-center gap-1 rounded-md border border-amber-500/40 bg-amber-500/10 px-1.5 py-px text-amber-800 dark:text-amber-200" title="Works in your project folder, not in a worktree of its own">
+              <FolderGit2 className="size-3 shrink-0" /> your folder
             </span>
           ) : null}
           <OriginBadge origin={task.origin} />
@@ -231,6 +258,17 @@ function TaskRow({ projectId, task, defaultBranch, shared }: { projectId: string
         ) : null}
         {run && run.costUsd > 0 ? <Cost usd={run.costUsd} model={run.model} className="text-muted-foreground" /> : null}
         <StatusPill status={task.status} />
+        {/* A working agent is stopped from the task page, where archiving asks first. */}
+        {running && !archived ? null : (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button size="icon-sm" variant="ghost" className="text-muted-foreground" disabled={archiving} aria-label={archived ? `Unarchive ${task.id}` : `Archive ${task.id}`} onClick={() => void toggleArchive()}>
+                {archiving ? <Spinner className="size-3.5" /> : archived ? <ArchiveRestore /> : <Archive />}
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>{archived ? "Unarchive: back in the list" : "Archive: hide it and stop watching it"}</TooltipContent>
+          </Tooltip>
+        )}
       </div>
     </li>
   );
@@ -265,11 +303,48 @@ function NewTaskDialog({
   const [error, setError] = useState<string | null>(null);
   const id = useId();
   const review = type === "review";
+  const [workIn, setWorkIn] = useState<"worktree" | "pr" | "folder">("worktree");
+  const [pulls, setPulls] = useState<ContinuablePr[] | null>(null);
+  const [pullsError, setPullsError] = useState<string | null>(null);
+  const [pickedPr, setPickedPr] = useState<number | null>(null);
+  const continuing = workIn === "pr";
+  const picked = pulls?.find((p) => p.number === pickedPr) ?? null;
+  const loadPulls = useCallback(async () => {
+    setPullsError(null);
+    try {
+      setPulls((await api.projectPulls(projectId)).pulls);
+    } catch (err) {
+      setPullsError(messageOf(err));
+    }
+  }, [projectId]);
+  useEffect(() => {
+    if (open && workIn === "pr" && pulls === null) void loadPulls();
+  }, [open, workIn, pulls, loadPulls]);
+  const [folder, setFolder] = useState<ProjectFolderStatus | null>(null);
+  const [folderError, setFolderError] = useState<string | null>(null);
+  const [folderLoading, setFolderLoading] = useState(false);
+  const inFolder = workIn === "folder";
+  const loadFolder = useCallback(async () => {
+    setFolderLoading(true);
+    try {
+      setFolder(await api.projectFolder(projectId));
+      setFolderError(null);
+    } catch (err) {
+      setFolderError(messageOf(err));
+    } finally {
+      setFolderLoading(false);
+    }
+  }, [projectId]);
+  useEffect(() => {
+    if (open) void loadFolder();
+  }, [open, loadFolder]);
+  const needsBranch = (review && !inFolder && !continuing && !startFrom) || (continuing && (!picked || Boolean(picked.blocked)));
+  const folderBlocked = inFolder && (!folder || Boolean(folder.blocked));
   const idError = taskId.trim() && !TASK_ID_PATTERN.test(taskId.trim()) ? 'Use letters, digits, ".", "_" or "-", starting with a letter or digit' : null;
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
-    if (!title.trim() || busy || uploads.uploading || (review && !startFrom) || idError) return;
+    if (!title.trim() || busy || uploads.uploading || needsBranch || folderBlocked || idError) return;
     setBusy(true);
     setError(null);
     try {
@@ -282,12 +357,17 @@ function NewTaskDialog({
         ...(base ? { baseBranch: base } : {}),
         ...(review && startFrom ? { startFrom } : {}),
         ...(taskId.trim() ? { id: taskId.trim() } : {}),
+        ...(inFolder ? { workIn: "folder" as const } : {}),
+        ...(continuing && picked ? { workIn: "pr" as const, pr: picked.number } : {}),
       });
       uploads.clear();
       setBaseBranch(null);
       setStartFrom(null);
       setTitle("");
       setTaskId("");
+      setWorkIn("worktree");
+      setPickedPr(null);
+      setPulls(null);
       setBody("");
       setBodyView("write");
       setType(DEFAULT_TASK_TYPE);
@@ -307,8 +387,120 @@ function NewTaskDialog({
             <DialogTitle>New task</DialogTitle>
             <DialogDescription>An agent picks it up when a slot is free.</DialogDescription>
           </DialogHeader>
-          <div className="grid gap-2">
-            <Label htmlFor={`${id}-base`}>Base branch</Label>
+          <fieldset className="grid gap-2">
+            <legend className="mb-2 text-sm font-medium">Where the agent works</legend>
+            <div className="grid gap-2 sm:grid-cols-3" role="radiogroup" aria-label="Where the agent works">
+              {(
+                [
+                  { value: "worktree", title: "New work", hint: "A new branch in a workspace of its own. The usual choice." },
+                  { value: "pr", title: "Continue a pull request", hint: "An open PR started elsewhere: its own workspace on that PR's branch, updating the same PR." },
+                  { value: "folder", title: "My project folder", hint: "Your checkout, on the branch it has now, with that branch's pull request." },
+                ] as const
+              ).map((o) => (
+                <button
+                  key={o.value}
+                  type="button"
+                  role="radio"
+                  aria-checked={workIn === o.value}
+                  onClick={() => setWorkIn(o.value)}
+                  className={cn(
+                    "grid gap-0.5 rounded-lg border p-3 text-left text-sm transition-colors hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50",
+                    workIn === o.value && "border-primary bg-muted/40",
+                  )}
+                >
+                  <span className="font-medium">{o.title}</span>
+                  <span className="text-xs text-muted-foreground">{o.hint}</span>
+                </button>
+              ))}
+            </div>
+            {continuing ? (
+              <div className="grid gap-1.5 rounded-lg border bg-muted/30 p-2 text-xs" aria-live="polite">
+                {pullsError ? <p className="p-1 text-destructive">{pullsError}</p> : null}
+                {pulls === null && !pullsError ? (
+                  <p className="flex items-center gap-2 p-1 text-muted-foreground">
+                    <Spinner className="size-3" /> Loading open pull requests…
+                  </p>
+                ) : null}
+                {pulls?.length === 0 ? <p className="p-1 text-muted-foreground">This project has no open pull requests.</p> : null}
+                {pulls?.length ? (
+                  <ul className="grid max-h-56 gap-1 overflow-y-auto" role="radiogroup" aria-label="Pull request to continue">
+                    {pulls.map((p) => (
+                      <li key={p.number}>
+                        <button
+                          type="button"
+                          role="radio"
+                          aria-checked={pickedPr === p.number}
+                          disabled={Boolean(p.blocked)}
+                          onClick={() => {
+                            setPickedPr(p.number);
+                            if (!title.trim()) setTitle(`Continue PR #${p.number}${p.title ? `: ${p.title}` : ""}`.slice(0, 200));
+                          }}
+                          className={cn(
+                            "grid w-full gap-0.5 rounded-md border bg-background px-2.5 py-2 text-left hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-70",
+                            pickedPr === p.number && "border-primary",
+                          )}
+                        >
+                          <span className="flex min-w-0 items-center gap-2">
+                            <GitPullRequest className="size-3.5 shrink-0" />
+                            <span className="font-medium">#{p.number}</span>
+                            <span className="min-w-0 truncate">{p.title ?? p.branch}</span>
+                          </span>
+                          <span className="font-mono text-muted-foreground">
+                            {p.branch} → {p.base}
+                          </span>
+                          {p.blocked ? <span className="text-amber-700 dark:text-amber-400">{p.blocked}</span> : null}
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
+                {picked && !picked.blocked ? (
+                  <p className="px-1 text-muted-foreground">
+                    The agent works on {picked.branch} in its own workspace and updates PR #{picked.number} (targets {picked.base}).
+                    {picked.prefixed ? "" : ` Every push to ${picked.branch} waits for your approval: it is not an agent branch.`}
+                  </p>
+                ) : null}
+              </div>
+            ) : null}
+            {inFolder ? (
+              <div className="grid gap-1.5 rounded-lg border bg-muted/30 p-3 text-xs" aria-live="polite">
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                  <code className="font-mono text-foreground">{folder?.path ?? "…"}</code>
+                  {folder?.branch ? (
+                    <span className="inline-flex items-center gap-1 font-mono">
+                      <GitBranch className="size-3" /> {folder.branch}
+                    </span>
+                  ) : null}
+                  {folder?.pr ? (
+                    <a href={folder.pr.url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 underline-offset-2 hover:underline">
+                      <GitPullRequest className="size-3" /> PR #{folder.pr.number}
+                    </a>
+                  ) : folder?.branch && !folder.onBase ? (
+                    <span className="text-muted-foreground">{folder.pushed ? "no open pull request yet" : "not pushed yet"}</span>
+                  ) : null}
+                  <Button type="button" variant="ghost" size="icon-sm" className="ml-auto size-6" onClick={() => void loadFolder()} disabled={folderLoading} aria-label="Check the folder again">
+                    {folderLoading ? <Spinner className="size-3" /> : <RefreshCw className="size-3" />}
+                  </Button>
+                </div>
+                {folderError ? <p className="text-destructive">{folderError}</p> : null}
+                {folder?.blocked ? <p className="text-destructive">{folder.blocked}</p> : null}
+                {folder && !folder.blocked ? (
+                  <ul className="grid list-disc gap-0.5 pl-4 text-muted-foreground">
+                    {folder.changeCount ? (
+                      <li className="text-amber-700 dark:text-amber-400">
+                        {folder.changeCount} uncommitted change{folder.changeCount === 1 ? "" : "s"} in the folder: you are asked before the agent starts, because its commits would include {folder.changeCount === 1 ? "it" : "them"}.
+                      </li>
+                    ) : null}
+                    {!folder.prefixed ? <li>Every push to {folder.branch} waits for your approval (it is your branch, not an agent branch).</li> : null}
+                    <li>Do not switch branches in the folder while the task runs; the task stops if you do. One folder task at a time.</li>
+                    <li>No setup command, copied local files or env-file overrides: the folder is used as it is.</li>
+                  </ul>
+                ) : null}
+              </div>
+            ) : null}
+          </fieldset>
+          <div className={cn("grid gap-2", continuing && "hidden")}>
+            <Label htmlFor={`${id}-base`}>{inFolder ? "Base branch (the pull request's target)" : "Base branch"}</Label>
             <BranchPicker
               id={`${id}-base`}
               projectId={projectId}
@@ -327,7 +519,7 @@ function NewTaskDialog({
               {taskTypeInfo(type)?.description}
             </p>
           </div>
-          {review ? (
+          {review && !inFolder && !continuing ? (
             <div className="grid gap-2">
               <Label htmlFor={`${id}-from`}>Branch with the work to continue</Label>
               <BranchPicker id={`${id}-from`} projectId={projectId} value={startFrom ?? ""} defaultBranch={defaultBranch} onChange={setStartFrom} />
@@ -418,7 +610,7 @@ function NewTaskDialog({
               <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
                 Cancel
               </Button>
-              <Button type="submit" disabled={!title.trim() || busy || uploads.uploading || (review && !startFrom) || Boolean(idError)}>
+              <Button type="submit" disabled={!title.trim() || busy || uploads.uploading || needsBranch || folderBlocked || Boolean(idError)}>
                 {busy ? "Creating…" : uploads.uploading ? "Uploading…" : "Create task"}
               </Button>
             </div>
@@ -439,6 +631,7 @@ export function ProjectPage({ projectId }: { projectId: string }) {
   const [filter, setFilterState] = useState<Filter>(readFilter);
   const [listenersOnly, setListenersOnlyState] = useState(readListenerFilter);
   const [typeFilter, setTypeFilterState] = useState<TypeFilter>(readTypeFilter);
+  const [showArchived, setShowArchived] = useState(false);
 
   const setTypeFilter = (next: TypeFilter) => {
     setTypeFilterState(next);
@@ -482,6 +675,20 @@ export function ProjectPage({ projectId }: { projectId: string }) {
     void load();
   }, [load]);
 
+  const archive = async (task: TaskListItem, archived: boolean) => {
+    try {
+      const res = await api.setTaskArchived(projectId, task.id, archived);
+      toast.success(archived ? `${task.id} archived` : `${task.id} unarchived`, {
+        description: res.effect,
+        ...(archived ? { action: { label: "Undo", onClick: () => void archive(task, false) } } : {}),
+      });
+      void load();
+      void refreshProjects();
+    } catch (err) {
+      toast.error(`Could not ${archived ? "archive" : "unarchive"} ${task.id}`, { description: messageOf(err) });
+    }
+  };
+
   useEffect(() => {
     if (connection === "live") return;
     const timer = window.setInterval(() => void load(), POLL_MS);
@@ -515,7 +722,9 @@ export function ProjectPage({ projectId }: { projectId: string }) {
     );
   }
 
-  const { project, tasks: allTasks } = data;
+  const { project } = data;
+  const archivedTasks = data.tasks.filter((t) => t.archivedAt);
+  const allTasks = showArchived ? archivedTasks : data.tasks.filter((t) => !t.archivedAt);
   const listenerCount = allTasks.filter(fromListener).length;
   const sourceTasks = listenersOnly ? allTasks.filter(fromListener) : allTasks;
   const typeCounts = Object.fromEntries(TASK_TYPES.map((t) => [t.type, sourceTasks.filter((x) => x.type === t.type).length])) as Record<TaskType, number>;
@@ -553,7 +762,7 @@ export function ProjectPage({ projectId }: { projectId: string }) {
           </>
         }
       />
-      <SharedServicesStrip project={project} tasks={allTasks} />
+      <SharedServicesStrip project={project} tasks={data.tasks} />
       {project.paused ? (
         <Notice
           tone="warning"
@@ -619,6 +828,15 @@ export function ProjectPage({ projectId }: { projectId: string }) {
             </Button>
           </>
         ) : null}
+        {archivedTasks.length > 0 || showArchived ? (
+          <>
+            <span className="mx-1 w-px shrink-0 self-stretch bg-border" aria-hidden="true" />
+            <Button size="sm" variant={showArchived ? "secondary" : "ghost"} aria-pressed={showArchived} onClick={() => setShowArchived(!showArchived)} title="Tasks you archived: hidden from the list and never picked up">
+              <Archive className="text-muted-foreground" />
+              Archived <span className="tabular-nums text-muted-foreground">{archivedTasks.length}</span>
+            </Button>
+          </>
+        ) : null}
         {typed || typeFilter !== "all" ? (
           <>
             <span className="mx-1 w-px shrink-0 self-stretch bg-border" aria-hidden="true" />
@@ -653,7 +871,13 @@ export function ProjectPage({ projectId }: { projectId: string }) {
           </>
         ) : null}
       </div>
-      {allTasks.length === 0 ? (
+      {showArchived && allTasks.length === 0 ? (
+        <Card>
+          <EmptyState icon={<Archive />} title="No archived tasks">
+            Archive a stale task from its row or its page to hide it here.
+          </EmptyState>
+        </Card>
+      ) : allTasks.length === 0 ? (
         <Card>
           <EmptyState
             icon={<Inbox />}
@@ -682,7 +906,7 @@ export function ProjectPage({ projectId }: { projectId: string }) {
             <Card className="py-0">
               <ul className="divide-y">
                 {g.tasks.map((t) => (
-                  <TaskRow key={t.id} projectId={projectId} task={t} defaultBranch={project.repo.baseBranch} shared={sharedNames} />
+                  <TaskRow key={t.id} projectId={projectId} task={t} defaultBranch={project.repo.baseBranch} shared={sharedNames} onArchive={archive} />
                 ))}
               </ul>
             </Card>

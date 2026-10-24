@@ -17,7 +17,7 @@ export type PrStatus = {
   comments: PrComment[];
 };
 
-export type OpenPr = { number: number; url: string; branch: string; base: string; headSha: string | null };
+export type OpenPr = { number: number; url: string; branch: string; base: string; headSha: string | null; title?: string };
 
 export interface PrHost {
   readonly name: string;
