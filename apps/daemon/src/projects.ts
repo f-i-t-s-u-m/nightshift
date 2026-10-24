@@ -1,9 +1,10 @@
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { homedir } from "node:os";
 import type { EnvFileOverrides, NightshiftConfig, NewProjectInput, PreviewConfig, Project, ProjectUpdate, TaskSource, TaskSummary } from "@nightshift/core";
 import { GithubPrHost, LocalPrHost, run, Workspaces, type PrHost } from "@nightshift/git";
-import { DEFAULT_TASK_PREFIX, TASK_PREFIX_PATTERN } from "@nightshift/core";
+import { DEFAULT_TASK_PREFIX, REFERENCE_NAME_PATTERN, TASK_PREFIX_PATTERN, type ProjectReference } from "@nightshift/core";
 import { WonderCallMcpSource } from "@nightshift/sources";
 import type { Store } from "@nightshift/store";
 import { LocalTaskSource } from "./local-source.ts";
@@ -126,6 +127,11 @@ export async function applyProjectUpdate(project: Project, update: ProjectUpdate
   if (update.kind !== undefined) next.kind = update.kind;
   if (update.brief !== undefined) next.brief = update.brief.trim() || undefined;
   if (update.paused !== undefined) next.paused = update.paused;
+  if (update.references !== undefined) {
+    const refs = normalizeReferences(update.references, next.repo.path);
+    if (refs.length) next.references = refs;
+    else delete next.references;
+  }
   if (update.taskPrefix !== undefined) {
     const prefix = normalizeTaskPrefix(update.taskPrefix);
     if (prefix) next.taskPrefix = prefix;
@@ -310,4 +316,23 @@ export function normalizeTaskPrefix(input: string | undefined): string | undefin
   if (!prefix || prefix === DEFAULT_TASK_PREFIX) return undefined;
   if (!TASK_PREFIX_PATTERN.test(prefix)) throw new Error(`The task id prefix ${input} is not valid: start with a letter, then up to 9 letters or digits (e.g. WC)`);
   return prefix;
+}
+
+/** Checks reference folders: a short unique name, an existing absolute folder that is not this repository. */
+export function normalizeReferences(input: ProjectReference[] | null | undefined, repoPath: string): ProjectReference[] {
+  const out: ProjectReference[] = [];
+  for (const raw of (input ?? []).slice(0, 10)) {
+    const name = String(raw?.name ?? "").trim().toLowerCase();
+    const folder = String(raw?.path ?? "").trim().replace(/\/+$/, "");
+    if (!REFERENCE_NAME_PATTERN.test(name)) throw new Error(`The reference name ${raw?.name} is not valid: lower-case letters, digits and -, up to 32`);
+    if (out.some((r) => r.name === name)) throw new Error(`Two references are called ${name}`);
+    if (!path.isAbsolute(folder) || !existsSync(folder) || !statSync(folder).isDirectory()) throw new Error(`The reference ${name} must be an existing folder (absolute path)`);
+    if (path.resolve(folder) === path.resolve(repoPath)) throw new Error(`The reference ${name} is this project's own repository`);
+    // Not a hidden folder itself (~/.ssh, ~/.aws, ~/.config) nor one so broad it holds everything (/, the home folder).
+    const resolved = path.resolve(folder);
+    if (path.basename(resolved).startsWith(".")) throw new Error(`The reference ${name} is a hidden folder`);
+    if (resolved === path.parse(resolved).root || resolved === homedir()) throw new Error(`The reference ${name} is too broad: choose the project folder itself`);
+    out.push({ name, path: path.resolve(folder) });
+  }
+  return out;
 }

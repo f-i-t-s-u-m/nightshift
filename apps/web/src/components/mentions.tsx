@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useId, useRef, useState, type KeyboardEvent, type RefObject } from "react";
-import { FileText, Folder } from "lucide-react";
+import { FileText, Folder, Library } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { api } from "../api";
 import { Spinner } from "./TaskBits";
@@ -73,7 +73,7 @@ export function useFileMentions({
 
   const pick = (file: string) => {
     if (!mention) return;
-    const folder = file.endsWith("/");
+    const folder = file.endsWith("/") || file.endsWith(":");
     const insert = `@${file}${folder ? "" : " "}`;
     const next = value.slice(0, mention.start) + insert + value.slice(mention.end);
     const caret = mention.start + insert.length;
@@ -131,9 +131,12 @@ export function useFileMentions({
       </div>
       <ul id={listId} role="listbox" aria-label="Files to mention" className="max-h-60 overflow-y-auto py-1">
         {items.map((f, i) => {
-          const folder = f.endsWith("/");
-          const name = f.replace(/\/$/, "").split("/").pop();
-          const dir = f.replace(/\/$/, "").split("/").slice(0, -1).join("/");
+          const ref = f.match(/^([a-z0-9][a-z0-9-]*):(.*)$/);
+          const inside = ref ? ref[2]! : f;
+          const top = Boolean(ref && !inside);
+          const folder = f.endsWith("/") || top;
+          const name = top ? ref![1] : inside.replace(/\/$/, "").split("/").pop();
+          const dir = top ? "read-only reference" : inside.replace(/\/$/, "").split("/").slice(0, -1).join("/");
           return (
             <li key={f} role="option" aria-selected={i === active}>
               <button
@@ -144,8 +147,9 @@ export function useFileMentions({
                 onClick={() => pick(f)}
                 className={cn("flex w-full min-w-0 items-center gap-2 px-2.5 py-1 text-left", i === active && "bg-muted")}
               >
-                {folder ? <Folder className="size-3.5 shrink-0 text-muted-foreground" /> : <FileText className="size-3.5 shrink-0 text-muted-foreground" />}
-                <span className="shrink-0 font-mono text-xs">{name}{folder ? "/" : ""}</span>
+                {top ? <Library className="size-3.5 shrink-0 text-teal-600 dark:text-teal-400" /> : folder ? <Folder className="size-3.5 shrink-0 text-muted-foreground" /> : <FileText className="size-3.5 shrink-0 text-muted-foreground" />}
+                {ref && !top ? <span className="shrink-0 rounded bg-teal-500/15 px-1 font-mono text-[10px] text-teal-800 dark:text-teal-200">{ref[1]}</span> : null}
+                <span className="shrink-0 font-mono text-xs">{name}{top ? ":" : folder ? "/" : ""}</span>
                 {dir ? <span className="min-w-0 truncate font-mono text-xs text-muted-foreground">{dir}</span> : null}
               </button>
             </li>

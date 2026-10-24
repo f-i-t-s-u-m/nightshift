@@ -2,7 +2,7 @@ import { useId, useRef, useState, type ReactNode } from "react";
 import { Plus, Rows3, Share2, Sparkles, SquareTerminal, X } from "lucide-react";
 import { useFileMentions } from "./mentions";
 import { DEFAULT_TASK_PREFIX, TASK_PREFIX_PATTERN, taskPrefixOf } from "@nightshift/core";
-import type { CheckConfig, DatabaseConfig, DeviceMode, LocalFilesConfig, ModelChoice, NewProjectInput, PreviewConfig, PreviewService, PreviewTarget, Project, ProjectInspection, ProjectKind, ProjectSource, ProjectUpdate, TesterConfig } from "@nightshift/core";
+import type { ProjectReference, CheckConfig, DatabaseConfig, DeviceMode, LocalFilesConfig, ModelChoice, NewProjectInput, PreviewConfig, PreviewService, PreviewTarget, Project, ProjectInspection, ProjectKind, ProjectSource, ProjectUpdate, TesterConfig } from "@nightshift/core";
 import { Button } from "@/components/ui/button";
 import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -55,6 +55,7 @@ export type ProjectForm = {
   baseBranch: string;
   branchPrefix: string;
   taskPrefix: string;
+  references: ProjectReference[];
   setup: string;
   gitHost: "github" | "local";
   sourceType: SourceType;
@@ -153,6 +154,7 @@ const blank: ProjectForm = {
   baseBranch: "main",
   branchPrefix: "nightshift/",
   taskPrefix: DEFAULT_TASK_PREFIX,
+  references: [],
   setup: "",
   gitHost: "github",
   sourceType: "local",
@@ -231,6 +233,7 @@ export const formFromProject = (p: Project): ProjectForm => ({
   baseBranch: p.repo.baseBranch,
   branchPrefix: p.repo.branchPrefix,
   taskPrefix: taskPrefixOf(p),
+  references: p.references ?? [],
   setup: p.repo.setup ?? "",
   gitHost: p.gitHost,
   sourceType: p.source.type,
@@ -443,6 +446,7 @@ const parts = (f: ProjectForm) => ({
   paused: f.paused,
   repo: { baseBranch: f.baseBranch.trim() || "main", branchPrefix: f.branchPrefix.trim(), setup: f.setup.trim(), remote: f.remote.trim() || "origin" },
   taskPrefix: cleanTaskPrefix(f.taskPrefix),
+  references: f.references,
   checks: cleanChecks(f),
   gitHost: f.gitHost,
   source: sourceOf(f),

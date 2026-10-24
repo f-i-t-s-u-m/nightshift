@@ -36,7 +36,25 @@ export function protectedInCommand(files: string[], command: string): string | n
 const PROTECTED_MESSAGE = (f: string) =>
   `${f} is a local file with the owner's secrets; the owner has not allowed you to read or change it. Its values are already active for the app. If you need a new or changed variable, add it to the matching .env.example and tell the owner.`;
 
-export function createGuardExtension(cwdFor: (conversationId: string) => string | undefined, protectedFor: (conversationId: string) => string[] = () => []) {
+/** Hidden files, env and key files, credentials and dependencies are never read from a reference folder. */
+const REFERENCE_SECRET = /^\.|^\.?env(\..*)?$|\.(pem|key|p12|pfx|keystore|jks)$|^id_(rsa|dsa|ecdsa|ed25519)|credential|secret|\.npmrc$|\.netrc$/i;
+
+/** The reference folder (read-only) a path falls in, or null; "blocked" for its hidden or secret files. */
+export function referenceHit(roots: string[], cwd: string, target: string): string | null | "blocked" {
+  const resolved = path.resolve(cwd, target);
+  for (const root of roots) {
+    if (!insideRoot(root, resolved)) continue;
+    const rel = path.relative(root, resolved);
+    return rel.split(path.sep).some((part) => part === "node_modules" || part === ".git" || REFERENCE_SECRET.test(part)) ? "blocked" : root;
+  }
+  return null;
+}
+
+export function createGuardExtension(
+  cwdFor: (conversationId: string) => string | undefined,
+  protectedFor: (conversationId: string) => string[] = () => [],
+  referencesFor: (conversationId: string) => string[] = () => [],
+) {
   return defineExtension({
     name: "nightshift-guard",
     hooks: [
@@ -47,7 +65,14 @@ export function createGuardExtension(cwdFor: (conversationId: string) => string 
           if (FILE_TOOLS.has(call.name)) {
             const target = typeof args.path === "string" ? args.path : undefined;
             if (!root) return { block: "No workspace for this conversation." };
-            if (target && !insideRoot(root, target)) return { block: `Only paths inside the task workspace (${root}) are allowed.` };
+            if (target && !insideRoot(root, target)) {
+              // Reference folders are read-only: reading is allowed, changing never.
+              const ref = referenceHit(referencesFor(String(api.conversationId)), root, target);
+              if (ref === "blocked") return { block: "Hidden, secret and dependency files of a reference folder are off limits." };
+              if (ref && call.name === "read") return undefined;
+              if (ref) return { block: `${ref} is a read-only reference folder: you may read it but never change it. Make your changes in the task workspace (${root}).` };
+              return { block: `Only paths inside the task workspace (${root}) are allowed, and reading inside the project's reference folders.` };
+            }
             const hit = target ? protectedHit(root, protectedFor(String(api.conversationId)), target) : null;
             if (hit) return { block: PROTECTED_MESSAGE(hit) };
           }

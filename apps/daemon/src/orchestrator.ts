@@ -1308,6 +1308,16 @@ export class Orchestrator {
       const local = this.projectFor(rc.projectId)?.localFiles;
       return local && !local.agentCanRead ? local.paths : [];
     },
+    referenceRoots: (rc) => (this.projectFor(rc.projectId)?.references ?? []).map((r) => r.path),
+    referencesNote: (rc) => {
+      const refs = this.projectFor(rc.projectId)?.references ?? [];
+      if (!refs.length) return undefined;
+      return [
+        "Reference folders (read-only): other projects or folders the owner shared for reference. Read files in them with the read tool (absolute paths) to see how things are done there; never change them, and copy nothing secret.",
+        ...refs.map((r) => `- ${r.name}: ${r.path}`),
+        "The owner may point at a file in one with @name:path; its contents are then added to the message.",
+      ].join("\n");
+    },
     delegate: async (rc, pieces, key) => this.delegate(rc.runId, pieces, key),
     teamGuide: (rc) => {
       const team = this.teamOf(rc.projectId, rc.taskId);
@@ -1805,24 +1815,32 @@ export class Orchestrator {
   private briefFor(project: Project, cwd: string): string | undefined {
     if (!project.brief?.includes("@")) return project.brief;
     const local = project.localFiles;
-    return expandMentions(project.brief, cwd, local && !local.agentCanRead ? local.paths : []).text;
+    return expandMentions(project.brief, cwd, local && !local.agentCanRead ? local.paths : [], project.references ?? []).text;
   }
 
   /** Adds the contents of the files the owner @-mentioned, read from the run's workspace (protected local files stay hidden). */
   private withMentions(run: Run, text: string): string {
     if (!text.includes("@")) return text;
     const local = this.projectFor(run.projectId)?.localFiles;
-    const expanded = expandMentions(text, run.worktree, local && !local.agentCanRead ? local.paths : []);
+    const expanded = expandMentions(text, run.worktree, local && !local.agentCanRead ? local.paths : [], this.projectFor(run.projectId)?.references ?? []);
     if (expanded.files.length) this.event(run.id, "info", `Files you pointed to: ${expanded.files.join(", ")}`);
     return expanded.text;
   }
 
   /** Files for the composer's @ picker: the task's workspace when it exists, else the project folder. */
-  searchFiles(projectId: string, query: string, taskId?: string): { root: "workspace" | "project"; files: string[] } {
+  searchFiles(projectId: string, query: string, taskId?: string): import("@nightshift/core").FileSearchResponse {
     const ctx = this.ctx(projectId);
     const run = taskId ? this.store.latestRunForTask(projectId, taskId) : null;
     const workspace = run && existsSync(run.worktree) ? run.worktree : null;
-    return { root: workspace ? "workspace" : "project", files: searchFiles(workspace ?? ctx.project.repo.path, query.slice(0, 200)) };
+    const references = (ctx.project.references ?? []).filter((r) => existsSync(r.path));
+    const q = query.slice(0, 200);
+    const root = workspace ? ("workspace" as const) : ("project" as const);
+    // `name:rest` searches inside that reference folder; otherwise the workspace, with matching references first.
+    const ref = q.match(/^([a-z0-9][a-z0-9-]*):(.*)$/);
+    const reference = ref ? references.find((r) => r.name === ref[1]) : undefined;
+    if (reference) return { root, references, files: searchFiles(reference.path, ref![2]!, 30, true).map((f) => `${reference.name}:${f}`) };
+    const roots = references.filter((r) => !q || r.name.startsWith(q.toLowerCase())).map((r) => `${r.name}:`);
+    return { root, references, files: [...roots, ...searchFiles(workspace ?? ctx.project.repo.path, q)].slice(0, 30) };
   }
 
   private agentMessage(text: string, author: TranscriptAuthor, attachmentIds: string[]): AgentMessage {

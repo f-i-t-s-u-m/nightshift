@@ -12,6 +12,7 @@ import { KindIcon } from "../components/projectKinds";
 import { ListenersCard, TestersCard } from "../components/ProjectVerification";
 import { ProjectGithubCard } from "../components/ProjectGithub";
 import { ProjectDeleteCard } from "../components/ProjectDelete";
+import { ProjectReferencesCard } from "../components/ProjectReferences";
 import { ProjectSkillsCard } from "../components/ProjectSkills";
 import { ProjectLocalFilesCard } from "../components/ProjectLocalFiles";
 import { Page, PageHeader, Spinner, ToneBadge } from "../components/TaskBits";
@@ -198,6 +199,13 @@ export function ProjectSettings({ projectId }: { projectId: string }) {
           apps={form.previewOn ? form.previewServices.map((s) => s.name.trim()).filter(Boolean) : []}
           disabled={saving}
           onChange={(localFiles) => setForm((f) => (f ? { ...f, localFiles } : f))}
+        />
+        <ProjectReferencesCard
+          projectId={projectId}
+          repoPath={project.repo.path}
+          value={form.references}
+          disabled={saving}
+          onChange={(references) => setForm((f) => (f ? { ...f, references } : f))}
         />
         <ProjectGithubCard
           project={project}

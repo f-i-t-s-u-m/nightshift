@@ -2472,6 +2472,40 @@ try {
     }
   });
 
+  await check("Reference folders: @name:path mentions and read-only agent access to another folder, never its secrets", async () => {
+    const ref = path.join(root, "ref-docs");
+    mkdirSync(path.join(ref, "sub"), { recursive: true });
+    writeFileSync(path.join(ref, "GUIDE.md"), "REFERENCE GUIDE TEXT\n");
+    writeFileSync(path.join(ref, "sub", "notes.md"), "NOTES IN REF\n");
+    writeFileSync(path.join(ref, ".env"), "SECRET=supersecret\n");
+    const patch = (body: unknown) => fetch(`${base}/api/projects/website`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const refused = await Promise.all([
+      patch({ references: [{ name: "Bad Name", path: ref }] }),
+      patch({ references: [{ name: "gone", path: path.join(root, "nope") }] }),
+      patch({ references: [{ name: "self", path: second.repo }] }),
+    ]);
+    if (refused.some((r) => r.status === 200)) throw new Error(`refused ${refused.map((r) => r.status)}`);
+    await patch({ references: [{ name: "docs", path: ref }] });
+    try {
+      type Found = { files: string[]; references: Array<{ name: string }> };
+      const top = await get<Found>("/api/projects/website/files/search?q=");
+      const inside = await get<Found>("/api/projects/website/files/search?q=docs:");
+      const guide = await get<Found>("/api/projects/website/files/search?q=docs:gui");
+      if (top.files[0] !== "docs:" || inside.files.some((f) => f.includes(".env")) || inside.files.join() !== "docs:sub/,docs:GUIDE.md" || guide.files[0] !== "docs:GUIDE.md")
+        throw new Error(JSON.stringify({ top: top.files.slice(0, 3), inside: inside.files, guide: guide.files }));
+      const created = await post<{ task: { id: string } }>("/api/projects/website/tasks", { title: "Reference task", body: `Follow @docs:GUIDE.md and never print @docs:.env. Reference dir: ${ref}` });
+      const run = await waitFor("reference PR", async () => {
+        const x = (await get<{ run: Run | null }>(`/api/projects/website/tasks/${created.task.id}`)).run;
+        return x?.prNumber ? x : null;
+      }, 40_000);
+      const notes = sh(second.origin, "show", `${run.branch}:REF_NOTES.md`);
+      if (notes !== "guide: yes\nsecret: safe\nlisted: yes\nread: yes\nwrite: blocked\n" || existsSync(path.join(ref, "hack.md"))) throw new Error(notes);
+      return `bad name, missing folder and the repo itself refused; search shows docs: and docs:GUIDE.md (no .env); the agent got GUIDE.md via @docs:, not the .env; its prompt lists the reference; it read docs/sub/notes.md and its write there was blocked`;
+    } finally {
+      await patch({ references: [] });
+    }
+  });
+
   await check("Kill switch turns on and off", async () => {
     const on = await post<{ killSwitch: boolean }>("/api/kill-switch", { on: true });
     const status = await get<StatusResponse>("/api/status");

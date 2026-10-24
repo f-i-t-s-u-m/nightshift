@@ -24,6 +24,10 @@ export interface RunBridge {
   delegate(run: RunContext, pieces: Array<{ title: string; brief: string; files?: string[] }>, idempotencyKey: string): Promise<{ ok: boolean; message: string }>;
   /** Team mode: the lead's prompt section about its team, or undefined. */
   teamGuide(run: RunContext): string | undefined;
+  /** The project's read-only reference folders (absolute paths) the agent may read. */
+  referenceRoots(run: RunContext): string[];
+  /** The prompt section listing them, or undefined. */
+  referencesNote(run: RunContext): string | undefined;
 }
 
 /** The team lead's extension: the delegate tool and a section explaining the team. Only lead conversations of team tasks get it. */
@@ -216,10 +220,15 @@ export function createTaskToolsExtension(bridge: RunBridge) {
     return run ? bridge.taskGuide(run) : undefined;
   });
 
+  const references = section("references", (input) => {
+    const run = bridge.contextFor(String(input.conversationId));
+    return run ? bridge.referencesNote(run) : undefined;
+  });
+
   const localFiles = section("local-files", (input) => {
     const run = bridge.contextFor(String(input.conversationId));
     return run ? bridge.localFilesNote(run) : undefined;
   });
 
-  return defineExtension({ name: "nightshift-task", tools: [getTask, listComments, postComment, askQuestion, runChecks, reportNotCausedHere, proposePrComment, preview, database], sections: [taskType, skills, localFiles] });
+  return defineExtension({ name: "nightshift-task", tools: [getTask, listComments, postComment, askQuestion, runChecks, reportNotCausedHere, proposePrComment, preview, database], sections: [taskType, skills, localFiles, references] });
 }

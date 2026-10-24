@@ -38,8 +38,14 @@ export type Project = {
   localFiles?: import("./workspace.ts").LocalFilesConfig;
   /** Prefix of the ids Nightshift gives its own tasks (`WC` → WC-1, WC-2, …). Default `T`. */
   taskPrefix?: string;
+  /** Folders outside the repository the owner can @-mention (`@name:path`) and agents may read, never change. */
+  references?: ProjectReference[];
   createdAt: string;
 };
+
+/** A read-only reference folder: another project or any folder on this machine. */
+export type ProjectReference = { name: string; path: string };
+export const REFERENCE_NAME_PATTERN = /^[a-z0-9][a-z0-9-]{0,31}$/;
 
 export type NewProjectInput = {
   name: string;
@@ -226,7 +232,12 @@ export type TeamWorkerView = {
 export type TeamView = { maxWorkers: number; handouts: number; workers: TeamWorkerView[] };
 
 /** `GET /api/projects/:id/files/search?q=&task=`: files for the composer's @ picker (folders end with "/"). */
-export type FileSearchResponse = { root: "workspace" | "project"; files: string[] };
+export type FileSearchResponse = {
+  root: "workspace" | "project";
+  /** Paths in the workspace, `name:` for a reference folder, or `name:path` inside one. */
+  files: string[];
+  references: ProjectReference[];
+};
 
 /** `GET /api/projects/:id/pulls`: open pull requests a task can continue. */
 export type ContinuablePr = {

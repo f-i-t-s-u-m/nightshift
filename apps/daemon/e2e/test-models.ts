@@ -54,6 +54,26 @@ function respond(context: { messages: Msg[]; systemPrompt?: string }) {
     if (step === 0) return call("write", { path: `team/${name}.md`, content: `${piece[2]} by worker ${piece[1]}\n` });
     return say(`Wrote team/${name}.md for "${piece[2]}".`);
   }
+  if (prompt.includes("Reference task") && prompt.includes("# Task")) {
+    const dir = prompt.match(/Reference dir: (\S+)/)?.[1] ?? "";
+    if (step === 0) return call("read", { path: `${dir}/sub/notes.md` });
+    if (step === 1) return call("write", { path: `${dir}/hack.md`, content: "should never land\n" });
+    if (step === 2) {
+      const results = messages.filter((m) => m.role === "toolResult").map((m) => textOf(m.content));
+      return call("write", {
+        path: "REF_NOTES.md",
+        content: [
+          `guide: ${prompt.includes("REFERENCE GUIDE TEXT") ? "yes" : "no"}`,
+          `secret: ${prompt.includes("supersecret") ? "leaked" : "safe"}`,
+          `listed: ${system.includes("Reference folders (read-only)") ? "yes" : "no"}`,
+          `read: ${results.some((r) => r.includes("NOTES IN REF")) ? "yes" : "no"}`,
+          `write: ${results.some((r) => r.includes("read-only reference folder")) ? "blocked" : "allowed"}`,
+          "",
+        ].join("\n"),
+      });
+    }
+    return say("Used the reference.");
+  }
   if (prompt.includes("Brief mention task") && prompt.includes("# Task")) {
     const saw = system.includes("Files the owner pointed to with @") && system.includes("export function totalWithTax");
     if (step === 0) return call("write", { path: "BRIEF_NOTES.md", content: `brief files: ${saw ? "yes" : "no"}\n` });

@@ -174,6 +174,7 @@ export type ProjectUpdate = Partial<{
   pushMode: "auto" | "approve";
   localFiles: import("./workspace.ts").LocalFilesConfig | null;
   taskPrefix: string;
+  references: import("./projects.ts").ProjectReference[];
 }>;
 
 export type BriefResponse = { brief: string };

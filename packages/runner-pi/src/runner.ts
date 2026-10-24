@@ -152,6 +152,10 @@ export class PiRunner implements AgentRunner {
         const rc = options.bridge.contextFor(id);
         return rc ? options.bridge.protectedFiles(rc) : [];
       },
+      (id) => {
+        const rc = options.bridge.contextFor(id);
+        return rc ? options.bridge.referenceRoots(rc) : [];
+      },
     );
     const planExt = defineExtension({ name: "nightshift-plan", tools: [submitPlan] });
     const teamExt = createTeamExtension(options.bridge);
