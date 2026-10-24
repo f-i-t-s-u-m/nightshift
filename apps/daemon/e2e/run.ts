@@ -2455,6 +2455,23 @@ try {
     return `search "pric" → price.js from the project; the agent saw price.js's contents (1 file: the e-mail address and a missing path were ignored); search inside the task's workspace finds its new MENTION_NOTES.md`;
   });
 
+  await check("@ mentions in the project brief put the files into each new agent's instructions", async () => {
+    const patch = (body: unknown) => fetch(`${base}/api/projects/website`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    await patch({ brief: "The pricing rules every change must follow are in @price.js." });
+    try {
+      const created = await post<{ task: { id: string } }>("/api/projects/website/tasks", { title: "Brief mention task", body: "Add a note." });
+      const run = await waitFor("brief mention PR", async () => {
+        const x = (await get<{ run: Run | null }>(`/api/projects/website/tasks/${created.task.id}`)).run;
+        return x?.prNumber ? x : null;
+      }, 40_000);
+      const notes = sh(second.origin, "show", `${run.branch}:BRIEF_NOTES.md`);
+      if (notes !== "brief files: yes\n") throw new Error(notes);
+      return "a brief mentioning @price.js gave the new agent price.js's contents in its instructions";
+    } finally {
+      await patch({ brief: "" });
+    }
+  });
+
   await check("Kill switch turns on and off", async () => {
     const on = await post<{ killSwitch: boolean }>("/api/kill-switch", { on: true });
     const status = await get<StatusResponse>("/api/status");

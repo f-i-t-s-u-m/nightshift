@@ -1,5 +1,6 @@
-import { useId, useState, type ReactNode } from "react";
+import { useId, useRef, useState, type ReactNode } from "react";
 import { Plus, Rows3, Share2, Sparkles, SquareTerminal, X } from "lucide-react";
+import { useFileMentions } from "./mentions";
 import { DEFAULT_TASK_PREFIX, TASK_PREFIX_PATTERN, taskPrefixOf } from "@nightshift/core";
 import type { CheckConfig, DatabaseConfig, DeviceMode, LocalFilesConfig, ModelChoice, NewProjectInput, PreviewConfig, PreviewService, PreviewTarget, Project, ProjectInspection, ProjectKind, ProjectSource, ProjectUpdate, TesterConfig } from "@nightshift/core";
 import { Button } from "@/components/ui/button";
@@ -665,6 +666,8 @@ export function BriefField({
 }) {
   const [generating, setGenerating] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const ref = useRef<HTMLTextAreaElement>(null);
+  const mentions = useFileMentions({ projectId: projectId ?? "", value, setValue: onChange, ref });
   const generate = async () => {
     if (!projectId) return;
     setGenerating(true);
@@ -689,18 +692,29 @@ export function BriefField({
           </Button>
         ) : null}
       </div>
+      <div className="relative">
+      {projectId ? mentions.list : null}
       <Textarea
+        ref={ref}
         id={id}
         rows={10}
         value={value}
-        onChange={(e) => onChange(e.target.value)}
+        {...(projectId ? mentions.inputProps : {})}
+        onKeyDown={(e) => {
+          if (projectId) mentions.onKeyDown(e);
+        }}
+        onChange={(e) => {
+          onChange(e.target.value);
+          if (projectId) mentions.detect(e.target.value, e.target.selectionStart);
+        }}
         disabled={generating || disabled}
         aria-describedby={`${id}-hint`}
         className="font-mono text-[13px]"
-        placeholder="What this project is, its stack, how to run it, conventions agents must follow…"
+        placeholder="What this project is, its stack, how to run it, conventions agents must follow… Type @ to point agents at a file (e.g. @CONTRIBUTING.md)."
       />
+      </div>
       <p id={`${id}-hint`} className="text-xs text-muted-foreground">
-        Added to every agent's instructions in this project. Generating replaces the text above; review it before saving.
+        Added to every agent's instructions in this project. Files you mention with @ are read from each task's workspace when its agent starts and added too. Generating replaces the text above; review it before saving.
       </p>
       {error ? (
         <Notice tone="danger" title="Could not generate the brief">

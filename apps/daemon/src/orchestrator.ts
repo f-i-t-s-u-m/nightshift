@@ -433,7 +433,7 @@ export class Orchestrator {
       let conversation = this.teamState(run.id).workers.find((x) => x.id === w.id)!.sessionId;
       if (!conversation) {
         const [provider, ...rest] = run.model.split("/");
-        conversation = await this.pi.createWorker({ cwd: dir, instructions: teamWorkerInstructions(dir, w.branch, ctx.project.brief), model: { provider, modelId: rest.join("/") } });
+        conversation = await this.pi.createWorker({ cwd: dir, instructions: teamWorkerInstructions(dir, w.branch, this.briefFor(ctx.project, dir)), model: { provider, modelId: rest.join("/") } });
         this.store.setSetting(`workerConv:${conversation}`, { runId: run.id, cwd: dir });
         this.addSession(run.id, { id: conversation, createdAt: new Date().toISOString(), reason: "worker", summary: `Worker ${w.index}: ${w.title}`, model: run.model });
         this.mutateWorker(run.id, w.id, { sessionId: conversation });
@@ -1053,7 +1053,7 @@ export class Orchestrator {
     const conversationId = await this.runner.create({
       runId: run.id,
       cwd: run.worktree,
-      instructions: instructions(ctx.project.checks, run.worktree, run.branch, ctx.project.brief),
+      instructions: instructions(ctx.project.checks, run.worktree, run.branch, this.briefFor(ctx.project, run.worktree)),
       model: { provider: run.model.split("/")[0], modelId: run.model.split("/").slice(1).join("/") },
     });
     this.addSession(run.id, { id: conversationId, createdAt: new Date().toISOString(), reason: input.mode, summary, model: run.model });
@@ -1801,6 +1801,13 @@ export class Orchestrator {
       .map((a) => ({ id: a.id, name: a.name, mimeType: a.mimeType, size: a.size, url: `/api/uploads/${a.id}` }));
   }
 
+  /** The project brief for a new conversation, with the files it @-mentions read from that conversation's workspace. */
+  private briefFor(project: Project, cwd: string): string | undefined {
+    if (!project.brief?.includes("@")) return project.brief;
+    const local = project.localFiles;
+    return expandMentions(project.brief, cwd, local && !local.agentCanRead ? local.paths : []).text;
+  }
+
   /** Adds the contents of the files the owner @-mentioned, read from the run's workspace (protected local files stay hidden). */
   private withMentions(run: Run, text: string): string {
     if (!text.includes("@")) return text;
@@ -1961,7 +1968,7 @@ export class Orchestrator {
           conversationId = await this.runner.create({
             runId: run.id,
             cwd: dir,
-            instructions: instructions(ctx.project.checks, dir, run.branch, ctx.project.brief),
+            instructions: instructions(ctx.project.checks, dir, run.branch, this.briefFor(ctx.project, dir)),
             model: { provider, modelId: rest.join("/") },
           });
           this.update(run.id, { conversationId, worktree: dir });
