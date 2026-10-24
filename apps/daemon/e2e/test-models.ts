@@ -47,6 +47,45 @@ function respond(context: { messages: Msg[]; systemPrompt?: string }) {
     if (step === 0) return call("bash", { command: "git diff --stat origin/main...HEAD" });
     return say('```json\n{"findings":[{"title":"double() silently accepts strings","detail":"double(\\"2\\") returns 4 via coercion.","severity":"major","file":"feature.js","line":2,"decision":{"question":"Should double() accept numeric strings?","options":["No, numbers only","Yes, parse strings"]}}]}\n```');
   }
+  // Team mode: workers write the file their piece names; the lead hands out two pieces, then finishes (or merges a conflict by hand).
+  const piece = prompt.match(/^# Your piece \(worker (\d+)\): (.+)$/m);
+  if (piece) {
+    const name = piece[2].includes("Clash") ? "clash" : piece[2].split(" ").pop()!.toLowerCase();
+    if (step === 0) return call("write", { path: `team/${name}.md`, content: `${piece[2]} by worker ${piece[1]}\n` });
+    return say(`Wrote team/${name}.md for "${piece[2]}".`);
+  }
+  if (prompt.includes("Split the rest") && !prompt.includes("Results from your team")) {
+    if (step === 0)
+      return call("delegate", {
+        pieces: [
+          { title: "Write gamma", brief: "Create team/gamma.md.", files: ["team/gamma.md"] },
+          { title: "Write delta", brief: "Create team/delta.md.", files: ["team/delta.md"] },
+        ],
+      });
+    return say("Handed out the rest.");
+  }
+  if ((prompt.includes("Team task") || prompt.includes("Clash team task")) && prompt.includes("# Task")) {
+    const clash = prompt.includes("Clash team task");
+    if (step === 0)
+      return call("delegate", {
+        pieces: clash
+          ? [
+              { title: "Clash one", brief: "Write team/clash.md.", files: ["team/clash.md"] },
+              { title: "Clash two", brief: "Write team/clash.md too.", files: ["team/clash.md"] },
+            ]
+          : [
+              { title: "Write alpha", brief: "Create team/alpha.md.", files: ["team/alpha.md"] },
+              { title: "Write beta", brief: "Create team/beta.md.", files: ["team/beta.md"] },
+            ],
+      });
+    return say("Handed out.");
+  }
+  if (prompt.includes("Results from your team")) {
+    const left = prompt.match(/git merge (\S+)`/);
+    if (left && step === 0) return call("bash", { command: `git merge -X theirs --no-edit ${left[1]} && echo merged by the lead` });
+    if (step <= (left ? 1 : 0)) return call("write", { path: "team/lead.md", content: `lead checked ${prompt.includes("conflicts") ? "a conflict" : "both pieces"}\n` });
+    return say("The lead combined the team's work.");
+  }
   if (prompt.includes("did NOT approve deleting")) {
     // Deletes the refused file once more: Nightshift must restore it without asking again.
     if (step === 0) return call("bash", { command: "git rm -q README.md && echo removed again" });

@@ -1,4 +1,5 @@
-export type SessionReason = "start" | "fresh" | "handoff" | "retry";
+/** "worker": a team worker's conversation (team mode), in its own worktree. */
+export type SessionReason = "start" | "fresh" | "handoff" | "retry" | "worker";
 
 export type TaskSession = {
   id: string;

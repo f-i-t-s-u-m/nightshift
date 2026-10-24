@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useId, useState, type FormEvent } from "react";
 import { Archive, ArchiveRestore, ChevronDown, CircleAlert, ExternalLink, FolderGit2, GitBranch, GitPullRequest, Inbox, ListFilter, Plus, Radar, RefreshCw, Settings, Share2 } from "lucide-react";
 import { toast } from "sonner";
-import { TASK_ID_PATTERN, TASK_TYPES, isTaskType, taskTypeInfo, type ContinuablePr, type ProjectFolderStatus, type PreviewStatus, type ProjectTasksResponse, type TaskListItem, type TaskPreviewSummary, type TaskStatus, type TaskType } from "@nightshift/core";
+import { TASK_ID_PATTERN, TASK_TYPES, TEAM_MAX_WORKERS, TEAM_MIN_WORKERS, isTaskType, taskTypeInfo, type ContinuablePr, type ProjectFolderStatus, type PreviewStatus, type ProjectTasksResponse, type TaskListItem, type TaskPreviewSummary, type TaskStatus, type TaskType } from "@nightshift/core";
 import { formatDateTime, type Tone } from "@nightshift/ui";
 import { Cost } from "../billing";
 import { Button } from "@/components/ui/button";
@@ -18,6 +18,7 @@ import { api, isNotFound, messageOf } from "../api";
 import { AttachButton, UploadTray, useUploads } from "../components/attachments";
 import { BranchPicker } from "../components/BranchPicker";
 import { Markdown } from "../components/Markdown";
+import { TeamBadge } from "../components/team";
 import { Notice } from "../components/Notice";
 import { Dot, EmptyState, Page, PageHeader, PhaseBadge, ProjectMeta, Spinner, StatusPill, TONE_TEXT } from "../components/TaskBits";
 import { projectSettingsHref, taskHref } from "../routing";
@@ -221,6 +222,7 @@ function TaskRow({
               <span className="truncate">from {task.baseBranch}</span>
             </span>
           ) : null}
+          {task.teamWorkers ? <TeamBadge workers={task.teamWorkers} /> : null}
           {task.inProjectFolder ? (
             <span className="inline-flex items-center gap-1 rounded-md border border-amber-500/40 bg-amber-500/10 px-1.5 py-px text-amber-800 dark:text-amber-200" title="Works in your project folder, not in a worktree of its own">
               <FolderGit2 className="size-3 shrink-0" /> your folder
@@ -304,6 +306,7 @@ function NewTaskDialog({
   const id = useId();
   const review = type === "review";
   const [workIn, setWorkIn] = useState<"worktree" | "pr" | "folder">("worktree");
+  const [teamSize, setTeamSize] = useState<number | null>(null);
   const [pulls, setPulls] = useState<ContinuablePr[] | null>(null);
   const [pullsError, setPullsError] = useState<string | null>(null);
   const [pickedPr, setPickedPr] = useState<number | null>(null);
@@ -359,6 +362,7 @@ function NewTaskDialog({
         ...(taskId.trim() ? { id: taskId.trim() } : {}),
         ...(inFolder ? { workIn: "folder" as const } : {}),
         ...(continuing && picked ? { workIn: "pr" as const, pr: picked.number } : {}),
+        ...(teamSize ? { team: { workers: teamSize } } : {}),
       });
       uploads.clear();
       setBaseBranch(null);
@@ -366,6 +370,7 @@ function NewTaskDialog({
       setTitle("");
       setTaskId("");
       setWorkIn("worktree");
+      setTeamSize(null);
       setPickedPr(null);
       setPulls(null);
       setBody("");
@@ -519,6 +524,59 @@ function NewTaskDialog({
               {taskTypeInfo(type)?.description}
             </p>
           </div>
+          <fieldset className="grid gap-2">
+            <legend className="mb-2 text-sm font-medium">Agents</legend>
+            <div className="grid gap-2 sm:grid-cols-2" role="radiogroup" aria-label="Agents">
+              {(
+                [
+                  { value: null, title: "One agent", hint: "A single agent does the whole task. The usual choice." },
+                  { value: teamSize ?? 3, title: "A team", hint: "A lead agent splits the work and hands pieces to workers that run in parallel, each in its own worktree." },
+                ] as const
+              ).map((o) => (
+                <button
+                  key={o.value === null ? "one" : "team"}
+                  type="button"
+                  role="radio"
+                  aria-checked={(teamSize === null) === (o.value === null)}
+                  onClick={() => setTeamSize(o.value)}
+                  className={cn(
+                    "grid gap-0.5 rounded-lg border p-3 text-left text-sm transition-colors hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50",
+                    (teamSize === null) === (o.value === null) && "border-primary bg-muted/40",
+                  )}
+                >
+                  <span className="font-medium">{o.title}</span>
+                  <span className="text-xs text-muted-foreground">{o.hint}</span>
+                </button>
+              ))}
+            </div>
+            {teamSize !== null ? (
+              <div className="grid gap-1.5 rounded-lg border bg-muted/30 p-3 text-xs">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="font-medium text-foreground">Up to</span>
+                  <div className="flex rounded-md border bg-background p-0.5" role="radiogroup" aria-label="Most workers">
+                    {Array.from({ length: TEAM_MAX_WORKERS - TEAM_MIN_WORKERS + 1 }, (_, i) => TEAM_MIN_WORKERS + i).map((n) => (
+                      <button
+                        key={n}
+                        type="button"
+                        role="radio"
+                        aria-checked={teamSize === n}
+                        onClick={() => setTeamSize(n)}
+                        className={cn("rounded px-2 py-0.5 tabular-nums focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50", teamSize === n ? "bg-muted font-medium text-foreground" : "text-muted-foreground hover:text-foreground")}
+                      >
+                        {n}
+                      </button>
+                    ))}
+                  </div>
+                  <span className="text-muted-foreground">workers, plus the lead</span>
+                </div>
+                <ul className="grid list-disc gap-0.5 pl-4 text-muted-foreground">
+                  <li>The lead decides how to split the task; small or tightly coupled tasks it may do alone.</li>
+                  <li>Each worker gets its own worktree on a local sub-branch (never pushed); the lead merges their work and makes the one pull request.</li>
+                  <li>Workers use the same model as the lead and their cost counts toward this task's budget. Setup runs in each worker's worktree.</li>
+                </ul>
+              </div>
+            ) : null}
+          </fieldset>
           {review && !inFolder && !continuing ? (
             <div className="grid gap-2">
               <Label htmlFor={`${id}-from`}>Branch with the work to continue</Label>

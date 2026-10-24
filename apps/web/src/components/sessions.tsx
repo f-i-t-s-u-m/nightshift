@@ -41,6 +41,7 @@ const REASONS: Record<SessionReason, { label: string; className: string }> = {
   fresh: { label: "Fresh", className: "bg-sky-500/15 text-sky-700 dark:text-sky-300" },
   handoff: { label: "Handoff", className: "bg-violet-500/15 text-violet-700 dark:text-violet-300" },
   retry: { label: "Retry", className: "bg-amber-500/15 text-amber-800 dark:text-amber-300" },
+  worker: { label: "Worker", className: "bg-teal-500/15 text-teal-800 dark:text-teal-300" },
 };
 
 const pct = (ratio: number) => `${Math.round(Math.min(ratio, 1) * 100)}%`;

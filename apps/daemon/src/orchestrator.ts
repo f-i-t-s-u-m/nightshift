@@ -38,13 +38,14 @@ import {
   type GithubRepoInput,
   type MoveToGithubResult,
 } from "@nightshift/core";
-import { LocalPrHost, run as exec, summarizeChecks, type PrCheck, type PrComment } from "@nightshift/git";
+import { authorEnv, LocalPrHost, run as exec, summarizeChecks, type PrCheck, type PrComment } from "@nightshift/git";
 import type { RunBridge, RunContext } from "@nightshift/runner-pi";
 import type { Store, StoredMessage } from "@nightshift/store";
 import { applyProjectUpdate, buildContext, seedProjectFromConfig, validateNewProject, type ProjectContext } from "./projects.ts";
 import { OnboardingService, type Summarize } from "./onboarding/service.ts";
 import { inspectRepository } from "./onboarding/inspect.ts";
-import type { ContinuablePr, ProjectFolderStatus, ProjectUpdate, ScaffoldInput } from "@nightshift/core";
+import type { ContinuablePr, ProjectFolderStatus, ProjectUpdate, ScaffoldInput, TeamView, TeamWorkerView } from "@nightshift/core";
+import { TEAM_MAX_WORKERS, TEAM_MIN_WORKERS } from "@nightshift/core";
 import { WorkspaceService } from "./workspace/service.ts";
 import { SHARED } from "./workspace/preview.ts";
 import { VerificationLog } from "./verification/log.ts";
@@ -59,7 +60,7 @@ import { answersCommand, finding, isCommand, isNightshiftComment, nightshiftMark
 /** Most PR comments the agent may propose on one task (D40). */
 const MAX_PR_COMMENTS = 5;
 import { createRepo, ensureReady, GithubError, pushHint, pushUrl, repoUrls, setDefaultBranch, tail, validateRepoInput } from "./github.ts";
-import { answerPrompt, feedbackPrompt, instructions, localChecksPrompt, operatorNotes, prBody, taskPrompt } from "./prompts.ts";
+import { answerPrompt, feedbackPrompt, instructions, localChecksPrompt, operatorNotes, prBody, taskPrompt, teamLeadGuide, teamResultsPrompt, teamWorkerInstructions, teamWorkerPrompt } from "./prompts.ts";
 
 type Pending = { requestId: string; text: string; author: TranscriptAuthor; attachmentIds: string[]; messageIds?: string[] };
 
@@ -68,6 +69,8 @@ type PiExtras = {
   seen(conversationId: string, messageId: string): Promise<boolean | null>;
   plan(conversationId: string, message: AgentMessage, requestId: string): Promise<{ status: string; answer: string | null; terminated: boolean; reason?: string }>;
   createReviewer(input: { cwd: string; instructions: string; model?: { provider: string; modelId: string } }): Promise<string>;
+  createWorker(input: { cwd: string; instructions: string; model?: { provider: string; modelId: string } }): Promise<string>;
+  setTeam(conversationId: string, on: boolean): Promise<void>;
   ask(conversationId: string, message: AgentMessage, requestId: string, mode?: "steer" | "followUp", messageIds?: string[]): Promise<{ status: string; answer: string | null; terminated: boolean; reason?: string }>;
   health(): Promise<{ blocked: string[]; tasks: number }>;
   contextStats(conversationId: string): Promise<{ tokens: number | null; turns: number }>;
@@ -82,6 +85,8 @@ const MAX_REVIEW_ROUNDS = 2;
 const VERSION = "0.2.0";
 const WORKING = new Set(["working", "fixing"]);
 const TESTERS_DIR = fileURLToPath(new URL("../testers/", import.meta.url)).replace(/\/$/, "");
+type TeamWorker = TeamWorkerView & { worktree: string; handout: string; attempt?: number };
+type TeamState = { workers: TeamWorker[]; handouts: Array<{ id: string; index: number; leadSha: string | null; done: boolean }> };
 type TesterQueue = { holder: string | null; waiters: Array<{ label: string; onWait: (holder: string, ahead: number) => void; grant: () => void }> };
 const REJECT_PUSH = /^((don'?t|do not) push( yet)?|not yet)[.!]?$/i;
 const TASK_CACHE_MS = 3000;
@@ -207,6 +212,24 @@ export class Orchestrator {
     return { type: this.taskTypeOf(projectId, taskId) };
   }
 
+  /** Turns team mode on (most workers) or off (null) for a task, new or already running. */
+  setTaskTeam(projectId: string, taskId: string, workers: number | null): { team: TeamView | null; effect: string } {
+    this.ctx(projectId);
+    const run = this.store.latestRunForTask(projectId, taskId);
+    if (run?.phase === "done") throw Object.assign(new Error("The task is done; create a new task for more work"), { status: 409 });
+    if (workers !== null && (!Number.isInteger(workers) || workers < TEAM_MIN_WORKERS || workers > TEAM_MAX_WORKERS)) throw new Error(`A team has ${TEAM_MIN_WORKERS} to ${TEAM_MAX_WORKERS} workers`);
+    this.store.setSetting(`taskTeam:${projectId}/${taskId}`, workers === null ? null : { workers });
+    const running = run ? this.teamState(run.id).handouts.some((h) => !h.done) : false;
+    const working = Boolean(run && isActivePhase(run.phase));
+    const effect =
+      workers === null
+        ? `One agent from now on.${running ? " The workers already running finish and their work is merged first." : ""}`
+        : `A team of a lead and up to ${workers} workers.${working ? " The lead can hand out work from its next step." : " The lead can hand out work when the task runs."}`;
+    if (run) this.event(run.id, "info", workers === null ? "Team mode turned off" : `Team mode turned on: up to ${workers} workers`);
+    this.touchTask(projectId, taskId);
+    return { team: this.teamView(projectId, taskId), effect };
+  }
+
   archivedAt(projectId: string, taskId: string): string | null {
     return this.store.setting<string | null>(`archived:${projectId}/${taskId}`, null);
   }
@@ -258,6 +281,172 @@ export class Orchestrator {
 
   private taskMeta(projectId: string, taskId: string) {
     return this.store.setting<{ origin?: TaskOrigin; continueBranch?: string; startFrom?: string; folder?: { branch: string } } | null>(`taskMeta:${projectId}/${taskId}`, null);
+  }
+
+  /** Team mode of a task (how many workers the lead may use), or null for a single agent. */
+  private teamOf(projectId: string, taskId: string): { workers: number } | null {
+    return this.store.setting<{ workers: number } | null>(`taskTeam:${projectId}/${taskId}`, null);
+  }
+
+  private teamState(runId: string): TeamState {
+    return this.store.setting<TeamState>(`team:${runId}`, { workers: [], handouts: [] });
+  }
+
+  private mutateTeam<T>(runId: string, fn: (state: TeamState) => T): T {
+    const state = this.teamState(runId);
+    const out = fn(state);
+    this.store.setSetting(`team:${runId}`, state);
+    const run = this.store.getRun(runId);
+    if (run) this.touchTask(run.projectId, run.taskId);
+    return out;
+  }
+
+  private mutateWorker(runId: string, workerId: string, patch: Partial<TeamWorker>) {
+    this.mutateTeam(runId, (t) => {
+      const w = t.workers.find((x) => x.id === workerId);
+      if (w) Object.assign(w, patch);
+    });
+  }
+
+  teamView(projectId: string, taskId: string): TeamView | null {
+    const team = this.teamOf(projectId, taskId);
+    if (!team) return null;
+    const run = this.store.latestRunForTask(projectId, taskId);
+    const state = run ? this.teamState(run.id) : { workers: [], handouts: [] };
+    return { maxWorkers: team.workers, handouts: state.handouts.length, workers: state.workers.map(({ worktree: _w, handout: _h, attempt: _a, ...view }) => view) };
+  }
+
+  /** The lead's delegate tool: records a hand-out; the working step runs it after the lead's turn ends. */
+  private delegate(runId: string, pieces: Array<{ title: string; brief: string; files?: string[] }>, key: string): { ok: boolean; message: string } {
+    const run = this.store.getRun(runId);
+    if (!run) return { ok: false, message: "This run no longer exists." };
+    const team = this.teamOf(run.projectId, run.taskId);
+    if (!team) return { ok: false, message: "Team mode is off for this task: do the work yourself." };
+    const clean = pieces.map((p) => ({ title: String(p.title ?? "").trim().slice(0, 120), brief: String(p.brief ?? "").trim(), files: (p.files ?? []).map(String).filter(Boolean).slice(0, 40) }));
+    if (!clean.length || clean.some((p) => !p.title || !p.brief)) return { ok: false, message: "Every piece needs a title and a brief." };
+    if (clean.length > team.workers) return { ok: false, message: `You have at most ${team.workers} workers: combine pieces so there are no more than ${team.workers}.` };
+    const state = this.teamState(runId);
+    if (state.handouts.some((h) => h.id === key)) return { ok: true, message: "Already handed out. Stop now; you are resumed with the results." };
+    if (state.handouts.some((h) => !h.done)) return { ok: false, message: "Your previous hand-out is still running." };
+    this.mutateTeam(runId, (t) => {
+      const handout = { id: key, index: t.handouts.length + 1, leadSha: null, done: false };
+      t.handouts.push(handout);
+      for (const p of clean) {
+        const index = t.workers.length + 1;
+        t.workers.push({
+          id: `w${index}`,
+          index,
+          title: p.title,
+          brief: p.brief,
+          files: p.files,
+          status: "queued",
+          branch: `${run.branch}--w${index}`,
+          summary: null,
+          error: null,
+          sessionId: null,
+          merge: null,
+          conflicts: [],
+          startedAt: null,
+          endedAt: null,
+          worktree: this.runCtx(run).workspaces.pathFor(`${run.taskId}--w${index}`),
+          handout: key,
+        });
+      }
+    });
+    this.event(runId, "agent", `Team: the lead handed out ${clean.length} piece${clean.length === 1 ? "" : "s"}: ${clean.map((p) => p.title).join("; ")}`);
+    return { ok: true, message: `Handed out ${clean.length} piece${clean.length === 1 ? "" : "s"} to workers. Stop now: you are resumed with their results once their work is merged.` };
+  }
+
+  private async stopWorkers(runId: string) {
+    for (const w of this.teamState(runId).workers) {
+      if (!w.sessionId || !["preparing", "working"].includes(w.status)) continue;
+      await this.runner.abort(w.sessionId).catch(() => {});
+    }
+  }
+
+  /** Runs one hand-out: commit the lead's work, run the workers in parallel in their own worktrees, merge their branches. Null when the task was paused or stopped. */
+  private async runTeam(run: Run, handoutId: string): Promise<string | null> {
+    const ctx = this.runCtx(run);
+    let handout = this.teamState(run.id).handouts.find((h) => h.id === handoutId)!;
+    if (!handout.leadSha) {
+      await this.assertFolderBranch(run);
+      await ctx.workspaces.commitAll(run.worktree, `${run.taskId}: the lead's work before handing out`);
+      const sha = (await exec("git", ["rev-parse", "HEAD"], { cwd: run.worktree })).stdout.trim();
+      this.mutateTeam(run.id, (t) => (t.handouts.find((h) => h.id === handoutId)!.leadSha = sha));
+      handout = this.teamState(run.id).handouts.find((h) => h.id === handoutId)!;
+    }
+    const mine = () => this.teamState(run.id).workers.filter((w) => w.handout === handoutId);
+    this.update(run.id, { activity: `Team: ${mine().length} workers working` });
+    const task = await ctx.source.getTask(run.taskId);
+    await Promise.all(mine().map((w) => this.runWorker(run, w.id, handout.leadSha!, task)));
+    const fresh = this.store.getRun(run.id);
+    if (!fresh || fresh.paused || !isActivePhase(fresh.phase)) return null;
+    this.update(run.id, { activity: "Team: merging the workers' changes" });
+    const env = { ...authorEnv(() => commitAuthor(this.config, ctx.project.repo.path)), GIT_TERMINAL_PROMPT: "0" };
+    for (const w of mine().sort((a, b) => a.index - b.index)) {
+      if (w.status !== "done" || w.merge !== null) continue;
+      const ahead = Number((await exec("git", ["rev-list", "--count", `HEAD..${w.branch}`], { cwd: run.worktree })).stdout.trim()) || 0;
+      if (!ahead) {
+        this.mutateWorker(run.id, w.id, { merge: "nothing" });
+        continue;
+      }
+      const merged = await exec("git", ["merge", "--no-ff", "--no-edit", "-m", `${run.taskId}: merge worker ${w.index}: ${w.title}`, w.branch], { cwd: run.worktree, env });
+      if (merged.code === 0) this.mutateWorker(run.id, w.id, { merge: "merged" });
+      else {
+        const conflicts = (await exec("git", ["diff", "--name-only", "--diff-filter=U"], { cwd: run.worktree })).stdout.split("\n").filter(Boolean);
+        await exec("git", ["merge", "--abort"], { cwd: run.worktree });
+        this.mutateWorker(run.id, w.id, { merge: "conflict", conflicts });
+      }
+    }
+    // The branches stay (the lead may merge one by hand); the worktrees go.
+    for (const w of mine()) if (existsSync(w.worktree)) await ctx.workspaces.remove(w.worktree).catch(() => {});
+    await exec("git", ["worktree", "prune"], { cwd: ctx.project.repo.path }).catch(() => {});
+    this.mutateTeam(run.id, (t) => (t.handouts.find((h) => h.id === handoutId)!.done = true));
+    const done = mine();
+    this.event(run.id, "agent", `Team: ${done.filter((w) => w.merge === "merged").length} merged, ${done.filter((w) => w.merge === "conflict").length} with conflicts, ${done.filter((w) => w.status !== "done").length} did not finish`);
+    return teamResultsPrompt(handout.index, done);
+  }
+
+  private async runWorker(run: Run, workerId: string, leadSha: string, task: import("@nightshift/core").TaskDetail) {
+    const ctx = this.runCtx(run);
+    const w = this.teamState(run.id).workers.find((x) => x.id === workerId)!;
+    if (w.status === "done" || w.status === "failed") return;
+    const halted = () => {
+      const r = this.store.getRun(run.id);
+      return !r || r.paused || !isActivePhase(r.phase);
+    };
+    // A worker stopped by Pause starts a new turn when the task resumes (its interrupted one cannot be replayed).
+    const attempt = (w.attempt ?? 1) + (w.status === "stopped" ? 1 : 0);
+    this.mutateWorker(run.id, w.id, { status: "preparing", startedAt: w.startedAt ?? new Date().toISOString(), error: null, attempt });
+    try {
+      const dir = await ctx.workspaces.ensureFrom(`${run.taskId}--w${w.index}`, w.branch, leadSha);
+      if (ctx.project.localFiles?.paths.length) syncLocalFiles(ctx.project.repo.path, dir, ctx.project.localFiles, false);
+      let setupNote = "";
+      const setup = ctx.project.repo.setup;
+      if (setup && !this.store.sideEffect(`workerSetup:${run.id}:${w.id}`)) {
+        const res = await exec("sh", ["-c", setup], { cwd: dir, timeoutMs: 30 * 60_000, env: this.workspace.env(run.projectId, run.taskId), group: true });
+        if (res.code !== 0) setupNote = `Nightshift's setup command \`${setup}\` failed in your workspace (exit ${res.code}). Make the workspace usable with bash before you work:\n${tailLines(`${res.stdout}\n${res.stderr}`, 1500)}`;
+        this.store.recordSideEffect(`workerSetup:${run.id}:${w.id}`, run.id, true);
+      }
+      if (halted()) return this.mutateWorker(run.id, w.id, { status: "stopped", endedAt: new Date().toISOString() });
+      let conversation = this.teamState(run.id).workers.find((x) => x.id === w.id)!.sessionId;
+      if (!conversation) {
+        const [provider, ...rest] = run.model.split("/");
+        conversation = await this.pi.createWorker({ cwd: dir, instructions: teamWorkerInstructions(dir, w.branch, ctx.project.brief), model: { provider, modelId: rest.join("/") } });
+        this.store.setSetting(`workerConv:${conversation}`, { runId: run.id, cwd: dir });
+        this.addSession(run.id, { id: conversation, createdAt: new Date().toISOString(), reason: "worker", summary: `Worker ${w.index}: ${w.title}`, model: run.model });
+        this.mutateWorker(run.id, w.id, { sessionId: conversation });
+      }
+      this.mutateWorker(run.id, w.id, { status: "working" });
+      const settled = await this.pi.ask(conversation, this.agentMessage(teamWorkerPrompt(task, w, setupNote), "system", []), `${run.id}:worker:${w.id}:${attempt}`, "followUp");
+      this.store.recordModelUsage(run.id, await this.runner.usage(conversation), `w${conversation}`);
+      if (halted()) return this.mutateWorker(run.id, w.id, { status: "stopped", endedAt: new Date().toISOString() });
+      if (settled.status !== "done") return this.mutateWorker(run.id, w.id, { status: "failed", error: settled.reason ?? "no answer", endedAt: new Date().toISOString() });
+      await ctx.workspaces.commitAll(dir, `${run.taskId}: ${w.title} (worker ${w.index})`);
+      this.mutateWorker(run.id, w.id, { status: "done", summary: settled.answer, endedAt: new Date().toISOString() });
+    } catch (error) {
+      this.mutateWorker(run.id, w.id, { status: halted() ? "stopped" : "failed", error: error instanceof Error ? error.message : String(error), endedAt: new Date().toISOString() });
+    }
   }
 
   /** True when the run works in the owner's project folder instead of its own worktree. */
@@ -987,6 +1176,11 @@ export class Orchestrator {
 
   readonly bridge: RunBridge = {
     contextFor: (conversationId) => {
+      const worker = this.store.setting<{ runId: string; cwd: string } | null>(`workerConv:${conversationId}`, null);
+      if (worker) {
+        const owner = this.store.getRun(worker.runId);
+        return owner ? { runId: owner.id, projectId: owner.projectId, taskId: owner.taskId, cwd: worker.cwd } : undefined;
+      }
       const reviewerRun = this.store.setting<string | null>(`reviewerConv:${conversationId}`, null);
       const run = reviewerRun ? this.store.getRun(reviewerRun) : this.store.listRuns(5000).find((r) => r.conversationId === conversationId);
       return run ? { runId: run.id, projectId: run.projectId, taskId: run.taskId, cwd: run.worktree } : undefined;
@@ -1112,6 +1306,12 @@ export class Orchestrator {
     protectedFiles: (rc) => {
       const local = this.projectFor(rc.projectId)?.localFiles;
       return local && !local.agentCanRead ? local.paths : [];
+    },
+    delegate: async (rc, pieces, key) => this.delegate(rc.runId, pieces, key),
+    teamGuide: (rc) => {
+      const team = this.teamOf(rc.projectId, rc.taskId);
+      const run = this.store.getRun(rc.runId);
+      return team && run && path.resolve(rc.cwd) === path.resolve(run.worktree) ? teamLeadGuide(team.workers) : undefined;
     },
     skills: (rc) => {
       try {
@@ -1581,6 +1781,7 @@ export class Orchestrator {
         let total = this.store.recordModelUsage(run.id, usage, `c${run.conversationId}`);
         const reviewerId = this.store.setting<string | null>(`reviewer:${run.id}`, null);
         if (reviewerId) total = this.store.recordModelUsage(run.id, await this.runner.usage(reviewerId), "review");
+        for (const w of this.teamState(run.id).workers) if (w.sessionId && w.status === "working") total = this.store.recordModelUsage(run.id, await this.runner.usage(w.sessionId), `w${w.sessionId}`);
         const label = activity.tool ? `${activity.tool}${activity.detail ? `: ${activity.detail}` : ""}` : activity.lastText ? `writing: ${activity.lastText.slice(-120)}` : activity.busy ? "thinking" : null;
         if (label !== run.activity) this.update(run.id, { activity: label });
         else this.emit({ type: "run", run: { ...run, usage: total } });
@@ -1825,6 +2026,13 @@ export class Orchestrator {
                   ? "Agent works on your message"
                   : "Agent continues",
         );
+        // Team mode can be switched on or off for an existing task; the lead's tools follow at its next turn.
+        const teamOn = Boolean(this.teamOf(run.projectId, run.taskId));
+        const teamKey = `teamConfigured:${run.conversationId}`;
+        if (teamOn || this.store.setting<boolean>(teamKey, false)) {
+          await this.pi.setTeam(run.conversationId!, teamOn);
+          this.store.setSetting(teamKey, teamOn);
+        }
         const settled = await this.pi.ask(
           run.conversationId!,
           this.agentMessage(pending.text, pending.author, pending.attachmentIds),
@@ -1852,6 +2060,16 @@ export class Orchestrator {
         if (settled.terminated && after.phase === "needs_info") {
           this.vlog.finishStep(run.id, agentStep, "waiting", { detail: "The agent asked you a question" });
           return false;
+        }
+        const handout = this.teamState(run.id).handouts.find((h) => !h.done);
+        if (handout) {
+          const count = this.teamState(run.id).workers.filter((w) => w.handout === handout.id).length;
+          this.vlog.finishStep(run.id, agentStep, "passed", { detail: `The lead handed out ${count} piece${count === 1 ? "" : "s"} to workers` });
+          const results = await this.runTeam(after, handout.id);
+          if (results === null) return false;
+          this.setPending(run.id, { requestId: `${run.id}:team:${handout.index}`, author: "system", text: results, attachmentIds: [] });
+          this.update(run.id, { activity: "The lead checks the team's work" });
+          return true;
         }
         this.vlog.finishStep(run.id, agentStep, "passed", { detail: (settled.answer ?? "").slice(0, 600) });
         this.setPending(run.id, null);
@@ -2724,6 +2942,7 @@ export class Orchestrator {
       if (["done", "failed", "stopped"].includes(run.phase) || run.paused) throw new Error(`cannot pause a ${run.paused ? "paused" : run.phase} run`);
       const updated = this.update(runId, { paused: true, slot: null, activity: "Paused" });
       this.stopTestersOf(runId, "Stopped: the task was paused");
+      await this.stopWorkers(runId);
       if (run.conversationId && isActivePhase(run.phase)) await this.runner.abort(run.conversationId).catch(() => {});
       this.event(runId, "info", "Paused by operator");
       return updated;
@@ -2752,6 +2971,7 @@ export class Orchestrator {
       if (run.conversationId) await this.runner.abort(run.conversationId).catch(() => {});
       const updated = this.update(runId, { phase: "stopped", paused: false, slot: null, activity: null });
       this.stopTestersOf(runId, "Stopped: the task was stopped");
+      await this.stopWorkers(runId);
       await this.comment(runId, `stopped:${runId}`, "Stopped by the Nightshift operator.").catch(() => {});
       await this.setTaskStatus(runId, "failed", ":stopped").catch(() => {});
       await this.releaseLease(runId);
@@ -2857,6 +3077,9 @@ export class Orchestrator {
       if (this.store.localTaskIdTaken(projectId, customId) || this.store.runsForProject(projectId).some((r) => r.taskId.toLowerCase() === customId.toLowerCase()))
         throw Object.assign(new Error(`This project already has a task ${customId}`), { status: 409 });
     }
+    const teamWorkers = Number(input.team?.workers);
+    if (input.team && (!Number.isInteger(teamWorkers) || teamWorkers < TEAM_MIN_WORKERS || teamWorkers > TEAM_MAX_WORKERS))
+      throw new Error(`A team has ${TEAM_MIN_WORKERS} to ${TEAM_MAX_WORKERS} workers`);
     const folder = input.workIn === "folder" ? await this.folderStatus(projectId) : null;
     if (folder?.blocked) throw Object.assign(new Error(folder.blocked), { status: 409 });
     const continuing = input.workIn === "pr" ? (await this.continuablePrs(projectId)).find((p) => p.number === Number(input.pr)) : null;
@@ -2887,6 +3110,7 @@ export class Orchestrator {
       if (!isTaskType(input.type)) throw new Error("Unknown task type");
       this.store.setSetting(`taskType:${projectId}/${task.id}`, input.type);
     }
+    if (input.team) this.store.setSetting(`taskTeam:${projectId}/${task.id}`, { workers: teamWorkers });
     const ids = (input.attachmentIds ?? []).filter((id) => this.store.attachment(id));
     if (ids.length) this.store.addTaskMessage(projectId, task.id, "Pictures attached to the task.", ids);
     ctx.tasksCache = null;
@@ -2910,6 +3134,7 @@ export class Orchestrator {
       preview: this.previewSummary(projectId, t.id),
       archivedAt: this.archivedAt(projectId, t.id),
       inProjectFolder: run ? this.inFolder(run) : Boolean(this.taskMeta(projectId, t.id)?.folder),
+      teamWorkers: this.teamOf(projectId, t.id)?.workers ?? null,
       openDecisions: run ? this.vlog.openDecisions(run.id).length : 0,
       openIssues: run ? this.vlog.openIssues(run.id).length : 0,
       run: run
@@ -2995,6 +3220,7 @@ export class Orchestrator {
       messages,
       attachments: messages.flatMap((m) => m.attachments),
       canMessage: this.archivedAt(projectId, taskId) ? { allowed: false, effect: ARCHIVED_NO_MESSAGE } : this.messageEffect(run, task.status),
+      team: this.teamView(projectId, taskId),
       archivedAt: this.archivedAt(projectId, taskId),
     };
   }

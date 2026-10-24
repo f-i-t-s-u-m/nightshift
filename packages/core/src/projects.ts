@@ -103,6 +103,8 @@ export type TaskListItem = {
   archivedAt: string | null;
   /** True when the agent works in the owner's project folder instead of its own worktree. */
   inProjectFolder: boolean;
+  /** Team mode: the most workers the lead may use; null for a single agent. */
+  teamWorkers: number | null;
 };
 
 export type ProjectTasksResponse = {
@@ -166,6 +168,8 @@ export type TaskViewResponse = {
   attachments: AttachmentRef[];
   canMessage: { allowed: boolean; effect: string };
   archivedAt: string | null;
+  /** Team mode: the lead's workers so far; null for a single-agent task. */
+  team: TeamView | null;
 };
 
 export type NewTaskInput = {
@@ -185,7 +189,41 @@ export type NewTaskInput = {
   workIn?: "worktree" | "pr" | "folder";
   /** With workIn "pr": the pull request's number. */
   pr?: number;
+  /** Team mode for this task: a lead agent that hands pieces of the work to up to `workers` worker agents. Absent: one agent. */
+  team?: { workers: number };
 };
+
+/** `PUT …/tasks/:t/team`: turn team mode on (with the most workers) or off (null) for an existing task. */
+export type TaskTeamUpdate = { workers: number | null };
+
+export const TEAM_MIN_WORKERS = 2;
+export const TEAM_MAX_WORKERS = 5;
+
+export type TeamWorkerStatus = "queued" | "preparing" | "working" | "done" | "failed" | "stopped";
+
+export type TeamWorkerView = {
+  id: string;
+  /** Number shown to people: Worker 1, Worker 2, … across all hand-outs of the task. */
+  index: number;
+  title: string;
+  brief: string;
+  files: string[];
+  status: TeamWorkerStatus;
+  /** Local sub-branch of the task branch; never pushed. */
+  branch: string;
+  summary: string | null;
+  error: string | null;
+  /** The worker's conversation, viewable as a session. */
+  sessionId: string | null;
+  /** "merged" into the task branch, "conflict" (left for the lead), or null while not merged yet. */
+  merge: "merged" | "conflict" | "nothing" | null;
+  conflicts: string[];
+  startedAt: string | null;
+  endedAt: string | null;
+};
+
+/** A team task's workers: one hand-out (delegation) after another. */
+export type TeamView = { maxWorkers: number; handouts: number; workers: TeamWorkerView[] };
 
 /** `GET /api/projects/:id/pulls`: open pull requests a task can continue. */
 export type ContinuablePr = {
@@ -244,6 +282,7 @@ export const PROJECT_ROUTES = {
   taskType: (projectId: string, taskId: string) => `/api/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}/type`,
   folder: (projectId: string) => `/api/projects/${encodeURIComponent(projectId)}/folder`,
   pulls: (projectId: string) => `/api/projects/${encodeURIComponent(projectId)}/pulls`,
+  taskTeam: (projectId: string, taskId: string) => `/api/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}/team`,
   taskArchive: (projectId: string, taskId: string) => `/api/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}/archive`,
   uploads: "/api/uploads",
   upload: (id: string) => `/api/uploads/${encodeURIComponent(id)}`,

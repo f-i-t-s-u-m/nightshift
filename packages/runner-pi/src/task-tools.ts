@@ -20,6 +20,35 @@ export interface RunBridge {
   taskGuide(run: RunContext): string | undefined;
   localFilesNote(run: RunContext): string | undefined;
   protectedFiles(run: RunContext): string[];
+  /** Team mode: hands pieces of the work to worker agents. `ok: false` keeps the lead's turn going with the message. */
+  delegate(run: RunContext, pieces: Array<{ title: string; brief: string; files?: string[] }>, idempotencyKey: string): Promise<{ ok: boolean; message: string }>;
+  /** Team mode: the lead's prompt section about its team, or undefined. */
+  teamGuide(run: RunContext): string | undefined;
+}
+
+/** The team lead's extension: the delegate tool and a section explaining the team. Only lead conversations of team tasks get it. */
+export function createTeamExtension(bridge: RunBridge) {
+  const delegate = defineTool({
+    name: "delegate",
+    description:
+      "Hand independent pieces of this task to worker agents that work in parallel, each in its own copy of the workspace. Give each piece a short title, a self-contained brief (what to change, where, how to check it) and the files it will mostly touch, so pieces do not overlap. Your turn ends; you are resumed with each worker's summary once their changes are merged into your workspace.",
+    parameters: Type.Object({
+      pieces: Type.Array(Type.Object({ title: Type.String(), brief: Type.String(), files: Type.Optional(Type.Array(Type.String())) }), { minItems: 1 }),
+    }),
+    replay: "safe",
+    execute: async (args, api) => {
+      const a = api as unknown as Api;
+      const run = bridge.contextFor(String(a.conversationId));
+      if (!run) throw new Error("This conversation is not attached to a Nightshift run.");
+      const res = await bridge.delegate(run, args.pieces, `delegate:${a.conversationId}:${a.callId}`);
+      return res.ok ? { ...text(res.message), control: { terminate: true as const } } : text(res.message);
+    },
+  });
+  const guide = section("team", (input) => {
+    const run = bridge.contextFor(String(input.conversationId));
+    return run ? bridge.teamGuide(run) : undefined;
+  });
+  return defineExtension({ name: "nightshift-team", tools: [delegate], sections: [guide] });
 }
 
 export function submitPlanTool(bridge: RunBridge) {

@@ -95,3 +95,62 @@ export function prBody(task: TaskDetail, summary: string | null, diffStat: strin
     "Opened by Nightshift. A human must review and merge.",
   ].join("\n");
 }
+
+/** The team lead's section: what delegating does and when to use it. */
+export function teamLeadGuide(maxWorkers: number) {
+  return [
+    `You lead a team: you can hand independent parts of this task to up to ${maxWorkers} worker agents with the delegate tool.`,
+    "They work in parallel, each in its own copy of your workspace that starts from your current state (Nightshift commits your changes so far first). They cannot ask questions, comment on the task or see each other's work.",
+    "Delegate when the task splits cleanly into parts that touch different files (for example the API and the UI, separate modules, or the tests). Do small or tightly coupled work yourself: overlapping pieces cause merge conflicts.",
+    "Give every piece a self-contained brief: the goal, where to change things, constraints, and how to check it. List the files each piece will mostly touch.",
+    "When the workers finish, Nightshift merges their branches into your workspace and resumes you with their summaries. Then check the combined change, fix what does not fit, merge any branch left to you, run the checks and reply with your summary. You may delegate again if needed.",
+  ].join("\n");
+}
+
+export function teamWorkerInstructions(cwd: string, branch: string, brief?: string) {
+  return [
+    "You are a worker agent in a team of AI software engineers. A lead agent gave you one piece of a task; a human reviews the final pull request.",
+    `Your workspace is a git worktree at ${cwd} on branch ${branch}. Work only inside it.`,
+    "Other workers change other parts of the same code at the same time in their own copies, so stay strictly within your piece: do not reformat, rename or move code outside it.",
+    "Do not commit, push or switch branches; Nightshift commits your work and merges it for the lead.",
+    "You cannot ask questions. If something blocks you, do what you can and say exactly what is missing.",
+    "Run the tests and checks that cover your piece with bash before you finish.",
+    ...(brief ? ["", "## Project brief", brief] : []),
+  ].join("\n");
+}
+
+export function teamWorkerPrompt(task: TaskDetail, piece: { index: number; title: string; brief: string; files: string[] }, setupNote: string) {
+  return [
+    `# Your piece (worker ${piece.index}): ${piece.title}`,
+    "",
+    piece.brief,
+    ...(piece.files.length ? ["", "Files you will mostly touch:", ...piece.files.map((f) => `- ${f}`)] : []),
+    "",
+    `## The whole task, for context only: ${task.id}: ${task.title}`,
+    "",
+    (task.body || "(no description)").slice(0, 6000),
+    ...(setupNote ? ["", setupNote] : []),
+    "",
+    "Do only your piece. End with a short summary: what you changed (files), how you checked it, and anything the lead must know.",
+  ].join("\n");
+}
+
+export function teamResultsPrompt(
+  handout: number,
+  workers: Array<{ index: number; title: string; status: string; branch: string; summary: string | null; error: string | null; merge: string | null; conflicts: string[] }>,
+) {
+  const lines = [`Results from your team (hand-out ${handout}):`, ""];
+  for (const w of workers) {
+    const outcome =
+      w.status !== "done"
+        ? `did not finish (${w.status}${w.error ? `: ${w.error}` : ""})`
+        : w.merge === "merged"
+          ? "merged into your workspace"
+          : w.merge === "conflict"
+            ? `NOT merged: conflicts in ${w.conflicts.join(", ")}. Merge it yourself with \`git merge ${w.branch}\`, resolve the conflicts and commit.`
+            : "made no changes";
+    lines.push(`## Worker ${w.index}: ${w.title}`, `Outcome: ${outcome}`, ...(w.summary ? ["Summary:", w.summary.slice(0, 3000)] : []), "");
+  }
+  lines.push("Check the combined change now: fix what does not fit together, finish anything a worker could not do, run the checks, then reply with your summary (or delegate again).");
+  return lines.join("\n");
+}

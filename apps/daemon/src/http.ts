@@ -539,7 +539,7 @@ export function startHttp(options: {
           }
         }
       }
-      const projectMatch = p.match(/^\/api\/projects\/([^/]+)(?:\/tasks(?:\/([^/]+)(?:\/(messages|sessions|verification|type|archive))?)?)?$/);
+      const projectMatch = p.match(/^\/api\/projects\/([^/]+)(?:\/tasks(?:\/([^/]+)(?:\/(messages|sessions|verification|type|archive|team))?)?)?$/);
       if (projectMatch) {
         const projectId = decodeURIComponent(projectMatch[1]);
         const taskId = projectMatch[2] ? decodeURIComponent(projectMatch[2]) : null;
@@ -551,6 +551,10 @@ export function startHttp(options: {
           if (isTasks && !taskId && req.method === "GET") return send(res, 200, await orchestrator.projectTasks(projectId));
           if (isTasks && !taskId && req.method === "POST") return send(res, 200, { task: await orchestrator.createTask(projectId, (await readJson(req)) as never) });
           if (taskId && !sub && req.method === "GET") return send(res, 200, await orchestrator.taskView(projectId, taskId, url.searchParams.get("session") || undefined));
+          if (taskId && sub === "team" && req.method === "PUT") {
+            const workers = ((await readJson(req)) as { workers?: number | null }).workers;
+            return send(res, 200, orchestrator.setTaskTeam(projectId, taskId, workers === null || workers === undefined ? null : Number(workers)));
+          }
           if (taskId && sub === "type" && req.method === "PUT") return send(res, 200, orchestrator.setTaskType(projectId, taskId, ((await readJson(req)) as { type?: TaskType | null }).type ?? null));
           if (taskId && sub === "archive" && req.method === "PUT") return send(res, 200, await orchestrator.setArchived(projectId, taskId, Boolean(((await readJson(req)) as { archived?: unknown }).archived)));
           if (taskId && sub === "verification" && req.method === "GET") return send(res, 200, orchestrator.verificationView(projectId, taskId));

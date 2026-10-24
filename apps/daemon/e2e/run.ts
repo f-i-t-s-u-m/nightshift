@@ -2377,6 +2377,68 @@ try {
     return `PR #${pr.number} listed (flagged while a local branch had an unpushed commit); continued in ${path.basename(done.worktree)} on feature/external-pr, push waited for approval, then the same PR #${done.prNumber} got "${t}: Continue external PR" on top of "external start"; a second task on it was refused`;
   });
 
+  await check("Team mode: a lead hands pieces to workers in their own worktrees, merges them (a conflict is left to the lead) and opens one PR", async () => {
+    const bad = await fetch(`${base}/api/projects/website/tasks`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ title: "Too big", body: "x", team: { workers: 9 } }) });
+    if (bad.status === 200) throw new Error("a 9-worker team was accepted");
+    type View = { run: Run | null; team: { maxWorkers: number; handouts: number; workers: Array<{ index: number; title: string; status: string; branch: string; merge: string | null; conflicts: string[]; sessionId: string | null }> } | null; sessions: Array<{ id: string; reason: string }> };
+    const runTeam = async (title: string) => {
+      const created = await post<{ task: { id: string; teamWorkers: number | null } }>("/api/projects/website/tasks", { title, body: "Split it.", team: { workers: 2 } });
+      const t = created.task.id;
+      const run = await waitFor(`${title} PR`, async () => {
+        const x = (await get<View>(`/api/projects/website/tasks/${t}`)).run;
+        return x?.prNumber && ["waiting_ci", "ready_for_review"].includes(x.phase) ? x : null;
+      }, 60_000);
+      return { t, run, created: created.task, view: await get<View>(`/api/projects/website/tasks/${t}`) };
+    };
+    const one = await runTeam("Team task");
+    const files = sh(second.origin, "ls-tree", "-r", "--name-only", one.run.branch);
+    const log = sh(second.origin, "log", "--format=%s", one.run.branch);
+    const workers = one.view.team?.workers ?? [];
+    const workerSessions = one.view.sessions.filter((x) => x.reason === "worker");
+    const pushedWorkerBranches = sh(second.origin, "branch", "--list", `${one.run.branch}--w*`).trim();
+    const leftover = existsSync(`${one.run.worktree}--w1`) || existsSync(`${one.run.worktree}--w2`);
+    if (
+      one.created.teamWorkers !== 2 ||
+      workers.length !== 2 ||
+      workers.some((w) => w.status !== "done" || w.merge !== "merged") ||
+      workerSessions.length !== 2 ||
+      !["team/alpha.md", "team/beta.md", "team/lead.md"].every((f) => files.includes(f)) ||
+      !log.includes("merge worker 1: Write alpha") ||
+      pushedWorkerBranches ||
+      leftover
+    )
+      throw new Error(JSON.stringify({ workers, sessions: one.view.sessions, files, log, pushedWorkerBranches, leftover }));
+    const two = await runTeam("Clash team task");
+    const clash = two.view.team?.workers ?? [];
+    const clashFile = sh(second.origin, "show", `${two.run.branch}:team/clash.md`);
+    const lead = sh(second.origin, "show", `${two.run.branch}:team/lead.md`);
+    if (clash[0]?.merge !== "merged" || clash[1]?.merge !== "conflict" || clash[1]?.conflicts.join() !== "team/clash.md" || !clashFile.includes("Clash two") || !lead.includes("a conflict"))
+      throw new Error(JSON.stringify({ clash, clashFile, lead }));
+    return `9 workers refused; "Team task": 2 workers wrote alpha and beta in their own worktrees, both merged, the lead added lead.md → PR #${one.run.prNumber} (worker branches never pushed, worktrees removed, 2 worker sessions); "Clash team task": worker 1 merged, worker 2 conflicted on team/clash.md and the lead merged it by hand`;
+  });
+
+  await check("Team mode can be turned on for an existing task: the lead splits the rest of the work at its next step", async () => {
+    const created = await post<{ task: { id: string; teamWorkers: number | null } }>("/api/projects/website/tasks", { title: "Late team task", body: "Add a note." });
+    const t = created.task.id;
+    const first = await waitFor("single-agent PR", async () => {
+      const x = (await get<{ run: Run | null }>(`/api/projects/website/tasks/${t}`)).run;
+      return x?.prNumber && ["waiting_ci", "ready_for_review"].includes(x.phase) ? x : null;
+    }, 40_000);
+    const team = (body: unknown) => fetch(`${base}/api/projects/website/tasks/${t}/team`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const bad = await team({ workers: 1 });
+    const on = (await (await team({ workers: 2 })).json()) as { team: { maxWorkers: number } | null; effect: string };
+    if (created.task.teamWorkers !== null || bad.status === 200 || on.team?.maxWorkers !== 2) throw new Error(JSON.stringify({ created: created.task, bad: bad.status, on }));
+    await post(`/api/projects/website/tasks/${t}/messages`, { text: "Split the rest of the work with your team." });
+    await waitFor("team work on the PR", async () => {
+      const files = sh(second.origin, "ls-tree", "-r", "--name-only", first.branch);
+      return files.includes("team/gamma.md") && files.includes("team/delta.md") ? true : null;
+    }, 60_000);
+    const view = await get<{ team: { workers: Array<{ title: string; merge: string | null }> } | null; run: Run }>(`/api/projects/website/tasks/${t}`);
+    const off = (await (await team({ workers: null })).json()) as { team: unknown };
+    if (view.team?.workers.length !== 2 || view.team.workers.some((w) => w.merge !== "merged") || view.run.prNumber !== first.prNumber || off.team !== null) throw new Error(JSON.stringify({ view: view.team, pr: view.run.prNumber, off }));
+    return `${t} ran as one agent (PR #${first.prNumber}); team turned on (2 workers; 1 refused) → "${on.effect.slice(0, 60)}…"; after a message the lead handed out gamma and delta, both merged into the same PR; turned off again`;
+  });
+
   await check("Kill switch turns on and off", async () => {
     const on = await post<{ killSwitch: boolean }>("/api/kill-switch", { on: true });
     const status = await get<StatusResponse>("/api/status");

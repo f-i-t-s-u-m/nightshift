@@ -63,6 +63,18 @@ export class Workspaces {
     return dir;
   }
 
+  /** A worktree for `key` on a local `branch` that starts at commit `sha` (team workers start from the lead's state). */
+  ensureFrom(key: string, branch: string, sha: string): Promise<string> {
+    return this.serialized(async () => {
+      const dir = this.pathFor(key);
+      if (existsSync(path.join(dir, ".git"))) return dir;
+      mkdirSync(this.workspacesDir, { recursive: true });
+      await this.git(this.repoPath, ["worktree", "prune"]);
+      await this.git(this.repoPath, ["worktree", "add", "--quiet", "-B", branch, dir, sha]);
+      return dir;
+    });
+  }
+
   async headSha(dir: string): Promise<string> {
     return (await this.git(dir, ["rev-parse", "HEAD"])).trim();
   }

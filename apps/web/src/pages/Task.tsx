@@ -78,6 +78,7 @@ import { Notice } from "../components/Notice";
 import { ContextMeter, LARGE_CONTEXT, LargeContextHint, NewSessionDialog, SessionsList, contextRatio, useCanStartNew } from "../components/sessions";
 import { EmptyState, Page, PhaseBadge, Spinner, StatusPill, TONE_DOT } from "../components/TaskBits";
 import { projectHref, useNow } from "../routing";
+import { TeamMenu, TeamPanel } from "../components/team";
 import { TaskTypeMenu } from "../components/taskTypes";
 import { useDebouncedRefresh, useLive } from "../live";
 import { ChecksTab, DecisionCards, DecisionCount, OriginBadge, attentionCount, openDecisionsOf, useVerification } from "../components/verification";
@@ -974,12 +975,27 @@ export function TaskPage({ projectId, taskId }: { projectId: string; taskId: str
     </section>
   );
 
+  const teamSection = view.team ? (
+    <DetailSection title="Team" count={view.team.workers.length}>
+      <TeamPanel
+        team={view.team}
+        onOpenSession={(id) => {
+          const s = sessionList.find((x) => x.id === id);
+          if (s) selectSession(s);
+        }}
+      />
+    </DetailSection>
+  ) : null;
+
   const sessionsSection =
     sessionList.length > 0 || run ? (
+      <>
+      {teamSection}
       <DetailSection title="Sessions" count={sessionList.length}>
         <SessionsList sessions={sessionList} viewingId={viewingOld ? sessionId : (activeSession?.id ?? null)} canStart={canStart} onSelect={selectSession} onNew={() => setNewSessionOpen(true)} />
       </DetailSection>
-    ) : null;
+      </>
+    ) : teamSection;
 
   const details = <Details view={view} plan={plan} awaitingApproval={awaitingApproval} sessions={sessionsSection} />;
 
@@ -1053,6 +1069,7 @@ export function TaskPage({ projectId, taskId }: { projectId: string; taskId: str
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
           <StatusPill status={task.status} />
           <TaskTypeMenu projectId={projectId} taskId={taskId} type={view.type} runActive={runActive} onChanged={(type) => setView((v) => (v ? { ...v, type } : v))} />
+          <TeamMenu projectId={projectId} taskId={taskId} team={view.team} done={run?.phase === "done"} onChanged={(team) => setView((v) => (v ? { ...v, team } : v))} />
           {run && (run.phase !== task.status || run.paused) ? <PhaseBadge phase={run.phase} paused={run.paused} /> : null}
           {view.archivedAt ? (
             <span className="inline-flex items-center gap-1 rounded-md bg-muted px-1.5 py-px font-medium" title={`Archived ${formatDateTime(view.archivedAt)}`}>

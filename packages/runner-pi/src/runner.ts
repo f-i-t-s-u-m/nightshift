@@ -18,7 +18,7 @@ import { createBashTool, createEditTool, createReadTool, createWriteTool } from 
 import type { AgentActivity, AgentCreate, AgentMessage, AgentRunner, AgentSettled, ModelUsage, TranscriptItem } from "@nightshift/core";
 import { createGuardExtension } from "./guard.ts";
 import { ProcessReaper } from "./reaper.ts";
-import { createTaskToolsExtension, submitPlanTool, type RunBridge } from "./task-tools.ts";
+import { createTaskToolsExtension, createTeamExtension, submitPlanTool, type RunBridge } from "./task-tools.ts";
 
 const ctx = BACKGROUND_CONTEXT;
 
@@ -115,6 +115,7 @@ export class PiRunner implements AgentRunner {
   private reviewModel!: ModelRef;
   private tools!: { read: unknown; bash: unknown; write: unknown; edit: unknown; submitPlan: unknown };
   private planExt!: Extension;
+  private teamExt!: Extension;
 
   private constructor(
     private readonly harness: AnyHarness,
@@ -153,9 +154,10 @@ export class PiRunner implements AgentRunner {
       },
     );
     const planExt = defineExtension({ name: "nightshift-plan", tools: [submitPlan] });
+    const teamExt = createTeamExtension(options.bridge);
     const registry = createRegistry();
     const defaults = [coding, taskTools, guard, ...(options.extensions ?? [])];
-    for (const extension of [...defaults, planExt]) registry.install(extension);
+    for (const extension of [...defaults, planExt, teamExt]) registry.install(extension);
 
     const storage = await openNodeSqliteStorage(path.join(options.dataDir, "pi.sqlite"));
     const harness = (await Harness.open(
@@ -182,6 +184,7 @@ export class PiRunner implements AgentRunner {
     runner.reviewModel = options.reviewModel ?? options.model;
     runner.tools = { read, bash, write, edit, submitPlan };
     runner.planExt = planExt;
+    runner.teamExt = teamExt;
     harness.resume();
     return runner;
   }
@@ -206,6 +209,24 @@ export class PiRunner implements AgentRunner {
       ctx,
     );
     return String(conversation.id);
+  }
+
+  /** A team worker: the coding tools only (no task tools: it cannot ask the owner, comment or delegate). */
+  async createWorker(input: { cwd: string; instructions: string; model?: ModelRef }): Promise<string> {
+    const conversation = await this.harness.createConversation(
+      {
+        ownership: { kind: "ownerless" },
+        agent: { model: input.model ?? this.defaultModel, cwd: input.cwd, instructions: input.instructions, tools: [this.tools.read, this.tools.write, this.tools.edit, this.tools.bash] },
+      },
+      ctx,
+    );
+    return String(conversation.id);
+  }
+
+  /** Gives a lead conversation the team extension (delegate tool and team section), or takes it away again. */
+  async setTeam(conversationId: string, on: boolean): Promise<void> {
+    const conversation = await this.conversation(conversationId);
+    await conversation.configure(on ? { extensions: { add: [this.teamExt] } } : { extensions: null }, ctx);
   }
 
   async createReviewer(input: { cwd: string; instructions: string; model?: ModelRef }): Promise<string> {

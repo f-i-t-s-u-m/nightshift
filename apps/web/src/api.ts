@@ -1,5 +1,7 @@
 import { FS_ROUTES, GITHUB_ROUTES as G, LOCAL_FILES_ROUTES as L, SKILL_ROUTES as K, VERIFY_ROUTES as V, type FsListResponse, type FsMkdirResponse } from "@nightshift/core";
 import type {
+  TaskTeamUpdate,
+  TeamView,
   ContinuablePr,
   ProjectFolderStatus,
   ServiceEnvResponse,
@@ -175,6 +177,8 @@ export const api = {
   createTask: (projectId: string, input: NewTaskInput) => post<NewTaskResponse>(ROUTES.tasks(projectId), input),
   setTaskArchived: (projectId: string, taskId: string, archived: boolean) =>
     request<TaskArchiveResponse>(P.taskArchive(projectId, taskId), { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ archived } satisfies TaskArchiveUpdate) }),
+  setTaskTeam: (projectId: string, taskId: string, workers: number | null) =>
+    request<{ team: TeamView | null; effect: string }>(P.taskTeam(projectId, taskId), { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ workers } satisfies TaskTeamUpdate) }),
   setTaskType: (projectId: string, taskId: string, type: TaskType | null) =>
     request<TaskTypeUpdate>(P.taskType(projectId, taskId), { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ type } satisfies TaskTypeUpdate) }),
   task: (projectId: string, taskId: string, sessionId?: string | null) =>
