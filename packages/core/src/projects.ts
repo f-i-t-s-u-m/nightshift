@@ -225,6 +225,9 @@ export type TeamWorkerView = {
 /** A team task's workers: one hand-out (delegation) after another. */
 export type TeamView = { maxWorkers: number; handouts: number; workers: TeamWorkerView[] };
 
+/** `GET /api/projects/:id/files/search?q=&task=`: files for the composer's @ picker (folders end with "/"). */
+export type FileSearchResponse = { root: "workspace" | "project"; files: string[] };
+
 /** `GET /api/projects/:id/pulls`: open pull requests a task can continue. */
 export type ContinuablePr = {
   number: number;
@@ -282,6 +285,8 @@ export const PROJECT_ROUTES = {
   taskType: (projectId: string, taskId: string) => `/api/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}/type`,
   folder: (projectId: string) => `/api/projects/${encodeURIComponent(projectId)}/folder`,
   pulls: (projectId: string) => `/api/projects/${encodeURIComponent(projectId)}/pulls`,
+  fileSearch: (projectId: string, q: string, taskId?: string) =>
+    `/api/projects/${encodeURIComponent(projectId)}/files/search?q=${encodeURIComponent(q)}${taskId ? `&task=${encodeURIComponent(taskId)}` : ""}`,
   taskTeam: (projectId: string, taskId: string) => `/api/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}/team`,
   taskArchive: (projectId: string, taskId: string) => `/api/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}/archive`,
   uploads: "/api/uploads",

@@ -79,6 +79,7 @@ import { ContextMeter, LARGE_CONTEXT, LargeContextHint, NewSessionDialog, Sessio
 import { EmptyState, Page, PhaseBadge, Spinner, StatusPill, TONE_DOT } from "../components/TaskBits";
 import { projectHref, useNow } from "../routing";
 import { TeamMenu, TeamPanel } from "../components/team";
+import { useFileMentions } from "../components/mentions";
 import { TaskTypeMenu } from "../components/taskTypes";
 import { useDebouncedRefresh, useLive } from "../live";
 import { ChecksTab, DecisionCards, DecisionCount, OriginBadge, attentionCount, openDecisionsOf, useVerification } from "../components/verification";
@@ -215,6 +216,28 @@ function Bubble({ mine, tone, children }: { mine: boolean; tone?: TranscriptAuth
   );
 }
 
+const FILES_MARK = "\n\n---\nFiles the owner pointed to with @";
+
+/** A message whose @-mentioned files Nightshift appended for the agent: the text, then the files folded away. */
+function MessageWithFiles({ text }: { text: string }) {
+  const at = text.indexOf(FILES_MARK);
+  if (at < 0) return <Markdown text={text} />;
+  const files = [...text.slice(at).matchAll(/^### (.+)$/gm)].map((m) => m[1]!.replace(/ \(folder\)$/, ""));
+  return (
+    <>
+      <Markdown text={text.slice(0, at)} />
+      <details className="mt-1.5 text-xs">
+        <summary className="cursor-pointer opacity-80 hover:opacity-100">
+          {files.length} file{files.length === 1 ? "" : "s"} shown to the agent: {files.join(", ")}
+        </summary>
+        <div className="mt-1 max-h-80 overflow-auto">
+          <Markdown text={text.slice(at + FILES_MARK.length).replace(/^[^\n]*\n/, "")} />
+        </div>
+      </details>
+    </>
+  );
+}
+
 function TranscriptView({ items }: { items: TranscriptItem[] }) {
   return (
     <>
@@ -236,7 +259,7 @@ function TranscriptView({ items }: { items: TranscriptItem[] }) {
               <Stamp at={item.at} />
             </MessageHead>
             <Bubble mine={mine} tone={item.author}>
-              {item.text ? <Markdown text={item.text} /> : null}
+              {item.text ? <MessageWithFiles text={item.text} /> : null}
               <AttachmentThumbs attachments={item.attachments} />
             </Bubble>
           </article>
@@ -576,6 +599,7 @@ function Composer({
   const uploads = useUploads();
   const [text, setText] = useState("");
   const ref = useRef<HTMLTextAreaElement>(null);
+  const mentions = useFileMentions({ projectId: view.project.id, taskId: view.task.id, value: text, setValue: setText, ref });
   const allowed = view.canMessage.allowed && !readOnly;
   const canSend = allowed && !uploads.uploading && (text.trim().length > 0 || uploads.attachments.length > 0);
 
@@ -605,11 +629,12 @@ function Composer({
       )}
       <div
         className={cn(
-          "rounded-xl border bg-card shadow-xs focus-within:border-ring focus-within:ring-3 focus-within:ring-ring/50",
+          "relative rounded-xl border bg-card shadow-xs focus-within:border-ring focus-within:ring-3 focus-within:ring-ring/50",
           uploads.dragging && "border-dashed border-primary",
           !allowed && "opacity-70",
         )}
       >
+        {mentions.list}
         <div className="px-3 pt-2">
           <UploadTray uploads={uploads} />
         </div>
@@ -623,11 +648,16 @@ function Composer({
           value={text}
           disabled={!allowed}
           aria-describedby="composer-hint composer-keys"
-          placeholder={readOnly ? "Read-only: older session" : !allowed ? "Messaging is not available right now" : awaitingApproval ? "Approve, or describe what to change in the plan…" : "Write to the agent…"}
+          placeholder={readOnly ? "Read-only: older session" : !allowed ? "Messaging is not available right now" : awaitingApproval ? "Approve, or describe what to change in the plan…" : "Write to the agent… (@ to point at a file)"}
           className="max-h-48 min-h-11 resize-none border-0 bg-transparent shadow-none focus-visible:ring-0 dark:bg-transparent"
-          onChange={(e) => setText(e.target.value)}
+          {...mentions.inputProps}
+          onChange={(e) => {
+            setText(e.target.value);
+            mentions.detect(e.target.value, e.target.selectionStart);
+          }}
           onPaste={uploads.onPaste}
           onKeyDown={(e) => {
+            if (mentions.onKeyDown(e)) return;
             if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
               e.preventDefault();
               submit();
@@ -637,7 +667,7 @@ function Composer({
         <div className="flex items-center gap-2 px-2 pb-2">
           {allowed ? <AttachButton uploads={uploads} compact /> : null}
           <span id="composer-keys" className="hidden text-xs text-muted-foreground sm:inline">
-            Enter to send · Shift+Enter for a new line
+            Enter to send · Shift+Enter for a new line · @ for a file
           </span>
           <Button type="submit" size="sm" className="ml-auto" disabled={!canSend}>
             {uploads.uploading ? "Uploading…" : "Send"}

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useId, useRef, useState, type FormEvent } from "react";
 import { Archive, ArchiveRestore, ChevronDown, CircleAlert, ExternalLink, FolderGit2, GitBranch, GitPullRequest, Inbox, ListFilter, Plus, Radar, RefreshCw, Settings, Share2 } from "lucide-react";
 import { toast } from "sonner";
 import { TASK_ID_PATTERN, TASK_TYPES, TEAM_MAX_WORKERS, TEAM_MIN_WORKERS, isTaskType, taskTypeInfo, type ContinuablePr, type ProjectFolderStatus, type PreviewStatus, type ProjectTasksResponse, type TaskListItem, type TaskPreviewSummary, type TaskStatus, type TaskType } from "@nightshift/core";
@@ -19,6 +19,7 @@ import { AttachButton, UploadTray, useUploads } from "../components/attachments"
 import { BranchPicker } from "../components/BranchPicker";
 import { Markdown } from "../components/Markdown";
 import { TeamBadge } from "../components/team";
+import { useFileMentions } from "../components/mentions";
 import { Notice } from "../components/Notice";
 import { Dot, EmptyState, Page, PageHeader, PhaseBadge, ProjectMeta, Spinner, StatusPill, TONE_TEXT } from "../components/TaskBits";
 import { projectSettingsHref, taskHref } from "../routing";
@@ -300,6 +301,8 @@ function NewTaskDialog({
   const [taskId, setTaskId] = useState("");
   const [body, setBody] = useState("");
   const [bodyView, setBodyView] = useState<"write" | "preview">("write");
+  const bodyRef = useRef<HTMLTextAreaElement>(null);
+  const bodyMentions = useFileMentions({ projectId, value: body, setValue: setBody, ref: bodyRef });
   const [type, setType] = useState<TaskType>(DEFAULT_TASK_TYPE);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -636,21 +639,30 @@ function NewTaskDialog({
               </div>
             </div>
             {bodyView === "write" ? (
+              <div className="relative">
+              {bodyMentions.list}
               <Textarea
+                ref={bodyRef}
                 id={`${id}-body`}
                 rows={8}
                 value={body}
-                onChange={(e) => setBody(e.target.value)}
+                {...bodyMentions.inputProps}
+                onChange={(e) => {
+                  setBody(e.target.value);
+                  bodyMentions.detect(e.target.value, e.target.selectionStart);
+                }}
                 onPaste={uploads.onPaste}
                 onKeyDown={(e) => {
+                  if (bodyMentions.onKeyDown(e)) return;
                   if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
                     e.preventDefault();
                     void submit(e);
                   }
                 }}
-                placeholder="Context, acceptance criteria, links. Markdown works (# headings, - lists, `code`). Paste or drop screenshots here."
+                placeholder="Context, acceptance criteria, links. Markdown works (# headings, - lists, `code`). Type @ to point the agent at a file. Paste or drop screenshots here."
                 className="max-h-[45dvh] resize-y overflow-y-auto"
               />
+              </div>
             ) : (
               <div className="max-h-[45dvh] min-h-36 overflow-y-auto rounded-lg border px-3 py-2" aria-label="Description preview">
                 {body.trim() ? <Markdown text={body} /> : <p className="text-sm text-muted-foreground">Nothing to preview yet.</p>}

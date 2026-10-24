@@ -54,6 +54,11 @@ function respond(context: { messages: Msg[]; systemPrompt?: string }) {
     if (step === 0) return call("write", { path: `team/${name}.md`, content: `${piece[2]} by worker ${piece[1]}\n` });
     return say(`Wrote team/${name}.md for "${piece[2]}".`);
   }
+  if (prompt.includes("Mention task") && prompt.includes("# Task")) {
+    const files = (prompt.match(/^### /gm) ?? []).length;
+    if (step === 0) return call("write", { path: "MENTION_NOTES.md", content: `saw: ${prompt.includes("export function totalWithTax") ? "yes" : "no"}\nfiles: ${files}\n` });
+    return say("Read the file you pointed to.");
+  }
   if (prompt.includes("Split the rest") && !prompt.includes("Results from your team")) {
     if (step === 0)
       return call("delegate", {

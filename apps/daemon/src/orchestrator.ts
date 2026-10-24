@@ -48,6 +48,7 @@ import type { ContinuablePr, ProjectFolderStatus, ProjectUpdate, ScaffoldInput, 
 import { TEAM_MAX_WORKERS, TEAM_MIN_WORKERS } from "@nightshift/core";
 import { WorkspaceService } from "./workspace/service.ts";
 import { SHARED } from "./workspace/preview.ts";
+import { expandMentions, searchFiles } from "./mentions.ts";
 import { VerificationLog } from "./verification/log.ts";
 import { parseReviewAnswer, parseTesterOutput, type Finding } from "./verification/parsers.ts";
 import { DEFAULT_TRIGGERS, type Decision, type PrWatch, type Issue, type TaskOrigin, type TesterConfig, type TriggerConfig, type TriggerEvent } from "@nightshift/core";
@@ -1800,6 +1801,23 @@ export class Orchestrator {
       .map((a) => ({ id: a.id, name: a.name, mimeType: a.mimeType, size: a.size, url: `/api/uploads/${a.id}` }));
   }
 
+  /** Adds the contents of the files the owner @-mentioned, read from the run's workspace (protected local files stay hidden). */
+  private withMentions(run: Run, text: string): string {
+    if (!text.includes("@")) return text;
+    const local = this.projectFor(run.projectId)?.localFiles;
+    const expanded = expandMentions(text, run.worktree, local && !local.agentCanRead ? local.paths : []);
+    if (expanded.files.length) this.event(run.id, "info", `Files you pointed to: ${expanded.files.join(", ")}`);
+    return expanded.text;
+  }
+
+  /** Files for the composer's @ picker: the task's workspace when it exists, else the project folder. */
+  searchFiles(projectId: string, query: string, taskId?: string): { root: "workspace" | "project"; files: string[] } {
+    const ctx = this.ctx(projectId);
+    const run = taskId ? this.store.latestRunForTask(projectId, taskId) : null;
+    const workspace = run && existsSync(run.worktree) ? run.worktree : null;
+    return { root: workspace ? "workspace" : "project", files: searchFiles(workspace ?? ctx.project.repo.path, query.slice(0, 200)) };
+  }
+
   private agentMessage(text: string, author: TranscriptAuthor, attachmentIds: string[]): AgentMessage {
     const images = attachmentIds
       .map((id) => this.store.attachment(id))
@@ -1993,7 +2011,7 @@ export class Orchestrator {
           const planned = await this.pi.plan(
             run.conversationId!,
             this.agentMessage(
-              `${pending.text}\n\nPLANNING STEP: explore the code read-only, then call submit_plan with your implementation plan. Do not change files yet.`,
+              `${this.withMentions(run, pending.text)}\n\nPLANNING STEP: explore the code read-only, then call submit_plan with your implementation plan. Do not change files yet.`,
               pending.author,
               pending.attachmentIds,
             ),
@@ -2035,7 +2053,7 @@ export class Orchestrator {
         }
         const settled = await this.pi.ask(
           run.conversationId!,
-          this.agentMessage(pending.text, pending.author, pending.attachmentIds),
+          this.agentMessage(this.withMentions(run, pending.text), pending.author, pending.attachmentIds),
           pending.requestId,
           "followUp",
           pending.messageIds ?? [],
@@ -3040,7 +3058,7 @@ export class Orchestrator {
       this.store.markMessagesDelivered([stored.id], run.id);
       this.noted.set(run.id, [...(this.noted.get(run.id) ?? []), stored.id]);
       const p = this.pi
-        .note(run.conversationId, this.agentMessage(clean || "(see attached pictures)", "operator", ids), `${run.id}:msg:${stored.id}`, [stored.id])
+        .note(run.conversationId, this.agentMessage(this.withMentions(run, clean) || "(see attached pictures)", "operator", ids), `${run.id}:msg:${stored.id}`, [stored.id])
         .catch((error) => this.log(`deliver message ${stored.id}: ${String(error)}`));
       this.track(run.id, p);
     } else if (!run || ["failed", "stopped"].includes(run.phase)) {

@@ -2439,6 +2439,22 @@ try {
     return `${t} ran as one agent (PR #${first.prNumber}); team turned on (2 workers; 1 refused) → "${on.effect.slice(0, 60)}…"; after a message the lead handed out gamma and delta, both merged into the same PR; turned off again`;
   });
 
+  await check("@ mentions: the composer finds files, and the agent gets the mentioned files' contents", async () => {
+    type Found = { root: string; files: string[] };
+    const before = await get<Found>("/api/projects/website/files/search?q=pric");
+    if (before.root !== "project" || before.files[0] !== "price.js") throw new Error(JSON.stringify(before));
+    const created = await post<{ task: { id: string } }>("/api/projects/website/tasks", { title: "Mention task", body: "Look at @price.js please. Mail owner@example.com if @missing/file.ts matters." });
+    const t = created.task.id;
+    const run = await waitFor("mention PR", async () => {
+      const x = (await get<{ run: Run | null }>(`/api/projects/website/tasks/${t}`)).run;
+      return x?.prNumber ? x : null;
+    }, 40_000);
+    const notes = sh(second.origin, "show", `${run.branch}:MENTION_NOTES.md`);
+    const inTask = await get<Found>(`/api/projects/website/files/search?q=notes&task=${t}`);
+    if (notes !== "saw: yes\nfiles: 1\n" || inTask.root !== "workspace" || !inTask.files.includes("MENTION_NOTES.md")) throw new Error(JSON.stringify({ notes, inTask }));
+    return `search "pric" → price.js from the project; the agent saw price.js's contents (1 file: the e-mail address and a missing path were ignored); search inside the task's workspace finds its new MENTION_NOTES.md`;
+  });
+
   await check("Kill switch turns on and off", async () => {
     const on = await post<{ killSwitch: boolean }>("/api/kill-switch", { on: true });
     const status = await get<StatusResponse>("/api/status");

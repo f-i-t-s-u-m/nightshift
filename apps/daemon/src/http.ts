@@ -399,6 +399,12 @@ export function startHttp(options: {
           return send(res, (error as { status?: number }).status ?? 400, { error: error instanceof Error ? error.message : String(error) });
         }
       }
+      const filesMatch = p.match(/^\/api\/projects\/([^/]+)\/files\/search$/);
+      if (filesMatch && req.method === "GET") {
+        const id = decodeURIComponent(filesMatch[1]);
+        if (!orchestrator.projects.has(id)) return send(res, 404, { error: "Project not found" });
+        return send(res, 200, orchestrator.searchFiles(id, url.searchParams.get("q") ?? "", url.searchParams.get("task") || undefined));
+      }
       const folderMatch = p.match(/^\/api\/projects\/([^/]+)\/(folder|pulls)$/);
       if (folderMatch && req.method === "GET") {
         const id = decodeURIComponent(folderMatch[1]);
